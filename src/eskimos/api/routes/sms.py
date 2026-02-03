@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Form
 from pydantic import BaseModel, Field
 
 router = APIRouter()
@@ -55,7 +55,11 @@ class SMSHistoryResponse(BaseModel):
 # ==================== Endpoints ====================
 
 @router.post("/send", response_model=SendSMSResponse)
-async def send_sms(request: SendSMSRequest) -> SendSMSResponse:
+async def send_sms(
+    recipient: str = Form(...),
+    message: str = Form(...),
+    modem_type: str = Form("auto"),
+) -> SendSMSResponse:
     """Send an SMS message.
 
     Sends SMS through the configured modem adapter.
@@ -65,10 +69,10 @@ async def send_sms(request: SendSMSRequest) -> SendSMSResponse:
     try:
         # For now, use mock adapter
         # TODO: Select adapter based on modem_type and config
-        if request.modem_type == "mock" or request.modem_type == "auto":
+        if modem_type == "mock" or modem_type == "auto":
             config = MockModemConfig(phone_number="886480453")
             adapter = MockModemAdapter(config)
-        elif request.modem_type == "puppeteer":
+        elif modem_type == "puppeteer":
             try:
                 from eskimos.adapters.modem.puppeteer import (
                     PuppeteerModemAdapter,
@@ -84,12 +88,12 @@ async def send_sms(request: SendSMSRequest) -> SendSMSResponse:
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown modem type: {request.modem_type}",
+                detail=f"Unknown modem type: {modem_type}",
             )
 
         # Send SMS
         await adapter.connect()
-        result = await adapter.send_sms(request.recipient, request.message)
+        result = await adapter.send_sms(recipient, message)
         await adapter.disconnect()
 
         return SendSMSResponse(
