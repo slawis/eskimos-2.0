@@ -124,18 +124,53 @@ class EskimosInstaller:
         self.root.update()
 
     def check_python(self):
-        try:
-            result = subprocess.run(
-                ["python", "--version"],
-                capture_output=True,
-                text=True
-            )
-            version = result.stdout.strip()
-            if "3.11" in version or "3.12" in version or "3.13" in version:
-                return True, version
-            return False, version
-        except Exception:
-            return False, None
+        """Check for Python using multiple methods."""
+        # Try different Python commands
+        python_commands = ["py", "python", "python3"]
+
+        for cmd in python_commands:
+            try:
+                result = subprocess.run(
+                    [cmd, "--version"],
+                    capture_output=True,
+                    text=True,
+                    shell=True
+                )
+                version = result.stdout.strip() or result.stderr.strip()
+                if any(v in version for v in ["3.11", "3.12", "3.13", "3.14"]):
+                    self.python_cmd = cmd
+                    return True, version
+            except Exception:
+                continue
+
+        # Try direct paths
+        python_paths = [
+            "C:/Python314/python.exe",
+            "C:/Python313/python.exe",
+            "C:/Python312/python.exe",
+            "C:/Python311/python.exe",
+            os.path.expanduser("~/AppData/Local/Programs/Python/Python314/python.exe"),
+            os.path.expanduser("~/AppData/Local/Programs/Python/Python313/python.exe"),
+            os.path.expanduser("~/AppData/Local/Programs/Python/Python312/python.exe"),
+            os.path.expanduser("~/AppData/Local/Programs/Python/Python311/python.exe"),
+        ]
+
+        for path in python_paths:
+            if os.path.exists(path):
+                try:
+                    result = subprocess.run(
+                        [path, "--version"],
+                        capture_output=True,
+                        text=True
+                    )
+                    version = result.stdout.strip()
+                    self.python_cmd = path
+                    return True, version
+                except Exception:
+                    continue
+
+        self.python_cmd = None
+        return False, None
 
     def check_git(self):
         try:
@@ -208,7 +243,7 @@ class EskimosInstaller:
             self.update_status("Tworzenie srodowiska...", 50)
             venv_path = INSTALL_DIR / "venv"
             if not venv_path.exists():
-                self.run_command(f'python -m venv "{venv_path}"')
+                self.run_command(f'"{self.python_cmd}" -m venv "{venv_path}"')
 
             # Step 5: Install dependencies
             self.update_status("Instalowanie zaleznosci (to moze chwile potrwac)...", 60)
