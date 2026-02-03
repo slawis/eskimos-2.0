@@ -53,7 +53,7 @@ async def check_for_updates() -> UpdateInfo:
         # TODO: Replace with actual repo URL
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                "https://api.github.com/repos/slawis/partner-recruiter/releases/latest",
+                "https://api.github.com/repos/slawis/eskimos-2.0/releases/latest",
                 timeout=10.0,
                 headers={"Accept": "application/vnd.github.v3+json"},
             )
