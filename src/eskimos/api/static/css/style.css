@@ -1,0 +1,101 @@
+/* Eskimos 2.0 - Custom Styles */
+
+/* Base styles */
+body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Loading spinner */
+.spinner {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* HTMX loading states */
+.htmx-request .htmx-indicator {
+    display: inline-block;
+}
+
+.htmx-indicator {
+    display: none;
+}
+
+/* Card hover effects */
+.bg-white.shadow {
+    transition: box-shadow 0.2s ease-in-out;
+}
+
+.bg-white.shadow:hover {
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+/* Button states */
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Form input focus */
+input:focus,
+textarea:focus,
+select:focus {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+}
+
+/* Status badges */
+.status-online {
+    background-color: #dcfce7;
+    color: #166534;
+}
+
+.status-offline {
+    background-color: #f3f4f6;
+    color: #6b7280;
+}
+
+.status-error {
+    background-color: #fee2e2;
+    color: #991b1b;
+}
+
+/* Responsive adjustments */
+@media (max-width: 640px) {
+    .max-w-7xl {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+}
+
+/* Toast notifications */
+.toast {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    z-index: 50;
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+/* Dark mode support (future) */
+@media (prefers-color-scheme: dark) {
+    /* Will add dark mode styles here */
+}

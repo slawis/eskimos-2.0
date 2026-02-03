@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Eskimos 2.0{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="md:flex md:items-center md:justify-between">
+        <div class="flex-1 min-w-0">
+            <h2 class="text-2xl font-bold leading-7 text-gray-900 sm:text-3xl sm:truncate">
+                Dashboard
+            </h2>
+        </div>
+        <div class="mt-4 flex md:mt-0 md:ml-4">
+            <button
+                hx-get="/api/health"
+                hx-target="#health-status"
+                hx-swap="innerHTML"
+                class="ml-3 inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-eskimos-600 hover:bg-eskimos-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-eskimos-500"
+            >
+                <svg class="w-4 h-4 mr-2 htmx-indicator animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                </svg>
+                Odswież status
+            </button>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+        <!-- Modem Status Card -->
+        <div class="bg-white overflow-hidden shadow rounded-lg">
+            <div class="p-5">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <div id="modem-status-icon" class="h-12 w-12 rounded-full bg-gray-100 flex items-center justify-center">
+                            <svg class="h-6 w-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="ml-5 w-0 flex-1">
+                        <dl>
+                            <dt class="text-sm font-medium text-gray-500 truncate">Status modemu</dt>
+                            <dd id="health-status" class="flex items-baseline">
+                                <div class="text-2xl font-semibold text-gray-400">
+                                    Sprawdzanie...
+                                </div>
+                            </dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-gray-50 px-5 py-3">
+                <div class="text-sm">
+                    <a href="#" hx-post="/api/modems/modem_mock/test" hx-target="#test-result" class="font-medium text-eskimos-600 hover:text-eskimos-500">
+                        Wyslij test SMS
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- SMS Sent Today -->
+        <div class="bg-white overflow-hidden shadow rounded-lg">
+            <div class="p-5">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <div class="h-12 w-12 rounded-full bg-blue-100 flex items-center justify-center">
+                            <svg class="h-6 w-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="ml-5 w-0 flex-1">
+                        <dl>
+                            <dt class="text-sm font-medium text-gray-500 truncate">Wyslane dzis</dt>
+                            <dd class="flex items-baseline">
+                                <div class="text-2xl font-semibold text-gray-900">0</div>
+                                <div class="ml-2 flex items-baseline text-sm font-semibold text-gray-500">
+                                    SMS
+                                </div>
+                            </dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- SMS Received -->
+        <div class="bg-white overflow-hidden shadow rounded-lg">
+            <div class="p-5">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <div class="h-12 w-12 rounded-full bg-green-100 flex items-center justify-center">
+                            <svg class="h-6 w-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"/>
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="ml-5 w-0 flex-1">
+                        <dl>
+                            <dt class="text-sm font-medium text-gray-500 truncate">Odebrane</dt>
+                            <dd class="flex items-baseline">
+                                <div class="text-2xl font-semibold text-gray-900">0</div>
+                                <div class="ml-2 flex items-baseline text-sm font-semibold text-gray-500">
+                                    SMS
+                                </div>
+                            </dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- API Status -->
+        <div class="bg-white overflow-hidden shadow rounded-lg">
+            <div class="p-5">
+                <div class="flex items-center">
+                    <div class="flex-shrink-0">
+                        <div class="h-12 w-12 rounded-full bg-eskimos-100 flex items-center justify-center">
+                            <svg class="h-6 w-6 text-eskimos-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="ml-5 w-0 flex-1">
+                        <dl>
+                            <dt class="text-sm font-medium text-gray-500 truncate">API</dt>
+                            <dd class="flex items-baseline">
+                                <div class="text-2xl font-semibold text-eskimos-600">Online</div>
+                            </dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Send SMS -->
+    <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-5 sm:p-6">
+            <h3 class="text-lg leading-6 font-medium text-gray-900 mb-4">
+                Szybkie wyslanie SMS
+            </h3>
+            <form hx-post="/api/sms/send" hx-target="#send-result" hx-swap="innerHTML" class="space-y-4">
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div>
+                        <label for="recipient" class="block text-sm font-medium text-gray-700">Numer telefonu</label>
+                        <input type="text" name="recipient" id="recipient"
+                            class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-eskimos-500 focus:border-eskimos-500 sm:text-sm"
+                            placeholder="123456789" required pattern="[0-9]{9}">
+                    </div>
+                    <div>
+                        <label for="modem_type" class="block text-sm font-medium text-gray-700">Modem</label>
+                        <select name="modem_type" id="modem_type"
+                            class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-eskimos-500 focus:border-eskimos-500 sm:text-sm">
+                            <option value="mock">Mock (testowy)</option>
+                            <option value="puppeteer">IK41VE1 (Puppeteer)</option>
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label for="message" class="block text-sm font-medium text-gray-700">Tresc wiadomosci</label>
+                    <textarea name="message" id="message" rows="3"
+                        class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-eskimos-500 focus:border-eskimos-500 sm:text-sm"
+                        placeholder="Wpisz tresc SMS..." required maxlength="640"></textarea>
+                    <p class="mt-1 text-sm text-gray-500"><span id="char-count">0</span>/640 znakow</p>
+                </div>
+                <div class="flex justify-end">
+                    <button type="submit"
+                        class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-eskimos-600 hover:bg-eskimos-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-eskimos-500">
+                        <svg class="w-4 h-4 mr-2 htmx-indicator animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Wyslij SMS
+                    </button>
+                </div>
+            </form>
+
+            <!-- Send Result -->
+            <div id="send-result" class="mt-4"></div>
+        </div>
+    </div>
+
+    <!-- Test Result (hidden by default) -->
+    <div id="test-result"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Character counter
+    const messageInput = document.getElementById('message');
+    const charCount = document.getElementById('char-count');
+
+    messageInput.addEventListener('input', function() {
+        charCount.textContent = this.value.length;
+    });
+
+    // Auto-refresh health status on page load
+    document.addEventListener('DOMContentLoaded', function() {
+        htmx.trigger('#health-status', 'load');
+    });
+
+    // Handle API responses
+    document.body.addEventListener('htmx:afterRequest', function(event) {
+        if (event.detail.pathInfo.requestPath === '/api/health') {
+            const response = JSON.parse(event.detail.xhr.responseText);
+            const statusIcon = document.getElementById('modem-status-icon');
+            const healthStatus = document.getElementById('health-status');
+
+            if (response.status === 'ok') {
+                statusIcon.classList.remove('bg-gray-100');
+                statusIcon.classList.add('bg-eskimos-100');
+                statusIcon.querySelector('svg').classList.remove('text-gray-400');
+                statusIcon.querySelector('svg').classList.add('text-eskimos-600');
+                healthStatus.innerHTML = '<div class="text-2xl font-semibold text-eskimos-600">Online</div>';
+            }
+        }
+
+        if (event.detail.pathInfo.requestPath === '/api/sms/send') {
+            const response = JSON.parse(event.detail.xhr.responseText);
+            const resultDiv = document.getElementById('send-result');
+
+            if (response.success) {
+                resultDiv.innerHTML = `
+                    <div class="rounded-md bg-green-50 p-4">
+                        <div class="flex">
+                            <div class="flex-shrink-0">
+                                <svg class="h-5 w-5 text-green-400" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                                </svg>
+                            </div>
+                            <div class="ml-3">
+                                <p class="text-sm font-medium text-green-800">
+                                    SMS wyslany! ID: ${response.message_id}
+                                </p>
+                            </div>
+                        </div>
+                    </div>`;
+            } else {
+                resultDiv.innerHTML = `
+                    <div class="rounded-md bg-red-50 p-4">
+                        <div class="flex">
+                            <div class="flex-shrink-0">
+                                <svg class="h-5 w-5 text-red-400" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                                </svg>
+                            </div>
+                            <div class="ml-3">
+                                <p class="text-sm font-medium text-red-800">
+                                    Blad: ${response.error || 'Nieznany blad'}
+                                </p>
+                            </div>
+                        </div>
+                    </div>`;
+            }
+        }
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% block title %}Ustawienia - Eskimos 2.0{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <h2 class="text-2xl font-bold text-gray-900">Ustawienia</h2>
+
+    <!-- Version & Updates -->
+    <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-5 sm:p-6">
+            <h3 class="text-lg font-medium text-gray-900 mb-4">Wersja i aktualizacje</h3>
+
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <p class="text-sm text-gray-500">Aktualna wersja</p>
+                    <p class="text-lg font-semibold text-gray-900">{{ version }}</p>
+                </div>
+                <div>
+                    <button
+                        hx-get="/api/update/check"
+                        hx-target="#update-status"
+                        class="px-4 py-2 bg-eskimos-600 text-white rounded-md hover:bg-eskimos-700">
+                        <span class="htmx-indicator">
+                            <svg class="animate-spin h-4 w-4 inline mr-2" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </span>
+                        Sprawdz aktualizacje
+                    </button>
+                </div>
+            </div>
+
+            <div id="update-status" class="mt-4">
+                <!-- Update status will appear here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Modem Configuration -->
+    <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-5 sm:p-6">
+            <h3 class="text-lg font-medium text-gray-900 mb-4">Konfiguracja modemu</h3>
+
+            <div hx-get="/api/modems" hx-trigger="load" hx-target="#modems-list">
+                <div id="modems-list" class="text-gray-500">
+                    Ladowanie...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- API Info -->
+    <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-5 sm:p-6">
+            <h3 class="text-lg font-medium text-gray-900 mb-4">API</h3>
+
+            <div class="space-y-2">
+                <p class="text-sm text-gray-600">
+                    <span class="font-medium">Dokumentacja:</span>
+                    <a href="/api/docs" class="text-eskimos-600 hover:underline">/api/docs</a>
+                </p>
+                <p class="text-sm text-gray-600">
+                    <span class="font-medium">Health check:</span>
+                    <a href="/api/health" class="text-eskimos-600 hover:underline">/api/health</a>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Restart -->
+    <div class="bg-white shadow rounded-lg border-l-4 border-yellow-400">
+        <div class="px-4 py-5 sm:p-6">
+            <h3 class="text-lg font-medium text-gray-900 mb-4">Restart serwera</h3>
+            <p class="text-sm text-gray-500 mb-4">
+                Restartuje serwer API. Uzyj po aktualizacji lub w przypadku problemow.
+            </p>
+            <button
+                hx-post="/api/update/restart"
+                hx-confirm="Czy na pewno chcesz zrestartowac serwer?"
+                class="px-4 py-2 bg-yellow-500 text-white rounded-md hover:bg-yellow-600">
+                Restart serwera
+            </button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.body.addEventListener('htmx:afterRequest', function(event) {
+        if (event.detail.pathInfo.requestPath === '/api/update/check') {
+            const response = JSON.parse(event.detail.xhr.responseText);
+            const statusDiv = document.getElementById('update-status');
+
+            if (response.update_available) {
+                statusDiv.innerHTML = `
+                    <div class="rounded-md bg-blue-50 p-4">
+                        <div class="flex">
+                            <div class="flex-shrink-0">
+                                <svg class="h-5 w-5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/>
+                                </svg>
+                            </div>
+                            <div class="ml-3 flex-1">
+                                <p class="text-sm font-medium text-blue-800">
+                                    Dostepna nowa wersja: ${response.latest_version}
+                                </p>
+                                <div class="mt-2">
+                                    <button
+                                        hx-post="/api/update/install"
+                                        hx-target="#update-status"
+                                        class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                        Zainstaluj aktualizacje
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+            } else {
+                statusDiv.innerHTML = `
+                    <div class="rounded-md bg-green-50 p-4">
+                        <p class="text-sm text-green-800">
+                            Masz najnowsza wersje (${response.current_version})
+                        </p>
+                    </div>`;
+            }
+        }
+
+        if (event.detail.pathInfo.requestPath === '/api/modems') {
+            const response = JSON.parse(event.detail.xhr.responseText);
+            const listDiv = document.getElementById('modems-list');
+
+            let html = '<div class="space-y-4">';
+            response.modems.forEach(modem => {
+                const statusColor = modem.status === 'online' ? 'green' : 'gray';
+                html += `
+                    <div class="flex items-center justify-between p-4 border rounded-lg">
+                        <div>
+                            <p class="font-medium">${modem.name || modem.phone_number}</p>
+                            <p class="text-sm text-gray-500">${modem.modem_type} | ${modem.phone_number}</p>
+                        </div>
+                        <div class="flex items-center">
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-${statusColor}-100 text-${statusColor}-800">
+                                ${modem.status}
+                            </span>
+                        </div>
+                    </div>`;
+            });
+            html += '</div>';
+            listDiv.innerHTML = html;
+        }
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,121 @@
+[project]
+name = "eskimos"
+version = "2.0.0"
+description = "SMS Gateway with AI - Professional Python Architecture"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "NinjaBot Team" }]
+
+dependencies = [
+    # Core
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+
+    # Async
+    "httpx>=0.25",
+    "aiofiles>=23.2",
+
+    # Database
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+
+    # Cache
+    "redis>=5.0",
+
+    # API
+    "fastapi>=0.108",
+    "uvicorn[standard]>=0.25",
+
+    # CLI
+    "typer[all]>=0.9",
+    "rich>=13.7",
+
+    # AI
+    "anthropic>=0.18",
+
+    # Scheduling
+    "apscheduler>=3.10",
+
+    # Puppeteer (legacy modem)
+    "pyppeteer>=2.0.0",
+
+    # Logging
+    "structlog>=24.1",
+
+    # Validation & Utils
+    "phonenumbers>=8.13",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "pytest-mock>=3.12",
+    "faker>=22.0",
+
+    # Code Quality
+    "ruff>=0.1.9",
+    "mypy>=1.8",
+    "types-redis>=4.6",
+
+    # Pre-commit
+    "pre-commit>=3.6",
+]
+
+[project.scripts]
+eskimos = "eskimos.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eskimos"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "ARG",  # flake8-unused-arguments
+    "SIM",  # flake8-simplify
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["eskimos"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["pyppeteer.*", "apscheduler.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --cov=src/eskimos --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/eskimos"]
+branch = true

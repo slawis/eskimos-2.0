@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}SMS - Eskimos 2.0{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <h2 class="text-2xl font-bold text-gray-900">Zarzadzanie SMS</h2>
+
+    <!-- Send SMS Form -->
+    <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-5 sm:p-6">
+            <h3 class="text-lg font-medium text-gray-900 mb-4">Wyslij SMS</h3>
+            <form hx-post="/api/sms/send" hx-target="#sms-result" class="space-y-4">
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Numer telefonu</label>
+                        <input type="text" name="recipient"
+                            class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-eskimos-500 focus:border-eskimos-500 sm:text-sm"
+                            placeholder="123456789" required>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Modem</label>
+                        <select name="modem_type" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-eskimos-500 focus:border-eskimos-500 sm:text-sm">
+                            <option value="mock">Mock (testowy)</option>
+                            <option value="puppeteer">IK41VE1</option>
+                        </select>
+                    </div>
+                    <div class="flex items-end">
+                        <button type="submit" class="w-full px-4 py-2 bg-eskimos-600 text-white rounded-md hover:bg-eskimos-700">
+                            Wyslij
+                        </button>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Tresc</label>
+                    <textarea name="message" rows="3" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-eskimos-500 focus:border-eskimos-500 sm:text-sm" required></textarea>
+                </div>
+            </form>
+            <div id="sms-result" class="mt-4"></div>
+        </div>
+    </div>
+
+    <!-- SMS History -->
+    <div class="bg-white shadow rounded-lg">
+        <div class="px-4 py-5 sm:p-6">
+            <h3 class="text-lg font-medium text-gray-900 mb-4">Historia SMS</h3>
+            <div hx-get="/api/sms/history" hx-trigger="load" hx-target="#history-table">
+                <div id="history-table" class="text-gray-500 text-center py-8">
+                    Ladowanie...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
