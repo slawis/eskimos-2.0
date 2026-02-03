@@ -43,6 +43,9 @@ class PuppeteerConfig:
     headless: bool = False  # Show browser for debugging
     slow_mo: int = 0  # Slow down operations (ms)
 
+    # Chromium executable path (auto-detected from env or None for default)
+    chromium_path: str | None = None
+
     # Timeouts (seconds)
     navigation_timeout: float = 30.0
     action_timeout: float = 10.0
@@ -51,6 +54,12 @@ class PuppeteerConfig:
     delay_after_navigation: int = 3000
     delay_after_click: int = 2000
     delay_after_type: int = 1000
+
+    def __post_init__(self) -> None:
+        """Auto-detect bundled Chromium path if not specified."""
+        import os
+        if self.chromium_path is None:
+            self.chromium_path = os.environ.get("PYPPETEER_EXECUTABLE_PATH")
 
 
 # DOM Selectors for IK41VE1 web interface
@@ -121,10 +130,11 @@ class PuppeteerModemAdapter(BaseModemAdapter):
 
             logger.info(f"Connecting to modem at {self.base_url}")
 
-            self._browser = await launch(
-                headless=self.config.headless,
-                slowMo=self.config.slow_mo,
-                args=[
+            # Build launch options
+            launch_options: dict = {
+                "headless": self.config.headless,
+                "slowMo": self.config.slow_mo,
+                "args": [
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
@@ -133,7 +143,14 @@ class PuppeteerModemAdapter(BaseModemAdapter):
                     "--no-zygote",
                     "--disable-gpu",
                 ],
-            )
+            }
+
+            # Use bundled Chromium if available
+            if self.config.chromium_path:
+                logger.info(f"Using bundled Chromium: {self.config.chromium_path}")
+                launch_options["executablePath"] = self.config.chromium_path
+
+            self._browser = await launch(**launch_options)
 
             self._page = await self._browser.newPage()
             self._page.setDefaultNavigationTimeout(
