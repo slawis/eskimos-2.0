@@ -14,6 +14,8 @@ echo   Instalator dla Windows
 echo  =======================================
 echo.
 
+set "INSTALL_DIR=C:\eskimos"
+
 REM Check Python
 echo [1/6] Sprawdzam Python...
 python --version >nul 2>&1
@@ -30,25 +32,35 @@ python --version
 echo [OK] Python znaleziony
 echo.
 
-REM Get script directory
-set "SCRIPT_DIR=%~dp0"
-set "PROJECT_DIR=%SCRIPT_DIR%.."
-set "INSTALL_DIR=C:\eskimos"
-
-echo [2/6] Katalog projektu: %PROJECT_DIR%
-echo [2/6] Katalog instalacji: %INSTALL_DIR%
+REM Check Git
+echo [2/6] Sprawdzam Git...
+git --version >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Git nie jest zainstalowany!
+    echo.
+    echo Pobierz Git z: https://git-scm.com/download/win
+    echo.
+    pause
+    exit /b 1
+)
+git --version
+echo [OK] Git znaleziony
 echo.
 
-REM Create install directory
-if not exist "%INSTALL_DIR%" (
-    echo [3/6] Tworzenie katalogu %INSTALL_DIR%...
-    mkdir "%INSTALL_DIR%"
+REM Clone or update repository
+echo [3/6] Pobieranie Eskimos 2.0 z GitHub...
+if exist "%INSTALL_DIR%\.git" (
+    echo [INFO] Aktualizowanie istniejącej instalacji...
+    cd /d "%INSTALL_DIR%"
+    git pull origin master
+) else (
+    if exist "%INSTALL_DIR%" (
+        echo [INFO] Usuwanie starej instalacji bez git...
+        rmdir /s /q "%INSTALL_DIR%"
+    )
+    git clone https://github.com/slawis/eskimos-2.0.git "%INSTALL_DIR%"
 )
-
-REM Copy project files
-echo [3/6] Kopiowanie plikow projektu...
-xcopy /E /I /Y "%PROJECT_DIR%\*" "%INSTALL_DIR%\" >nul 2>&1
-echo [OK] Pliki skopiowane
+echo [OK] Repo pobrane
 echo.
 
 REM Create virtual environment
@@ -94,7 +106,7 @@ echo pause >> "%INSTALL_DIR%\start.bat"
 echo [OK] Utworzono start.bat
 echo.
 
-REM Create desktop shortcut (optional)
+REM Create desktop shortcut
 echo Tworzenie skrotu na pulpicie...
 set "DESKTOP=%USERPROFILE%\Desktop"
 echo [InternetShortcut] > "%DESKTOP%\Eskimos Dashboard.url"
@@ -112,11 +124,9 @@ echo.
 echo    1. Otworz: %INSTALL_DIR%\start.bat
 echo    2. Przegladarka: http://localhost:8000
 echo.
-echo  Lub z linii polecen:
-echo.
-echo    cd %INSTALL_DIR%
-echo    venv\Scripts\activate
-echo    eskimos serve
+echo  Aktualizacje:
+echo    - Dashboard: Settings - Sprawdz aktualizacje
+echo    - Lub ponownie uruchom ten skrypt
 echo.
 echo  =======================================
 echo.
