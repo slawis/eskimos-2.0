@@ -162,6 +162,50 @@ class Settings(BaseSettings):
         description="Legacy PHP API URL",
     )
 
+    # ==================== Central API (Daemon) ====================
+    central_api_url: str = Field(
+        default="https://eskimos.ninjabot.pl/api/eskimos",
+        description="Central management API URL",
+    )
+    central_api_key: str = Field(
+        default="eskimos-daemon-2026",
+        description="API key for central server authentication",
+    )
+
+    # ==================== Daemon ====================
+    daemon_enabled: bool = Field(
+        default=True,
+        description="Enable phone-home daemon",
+    )
+    daemon_heartbeat_interval: int = Field(
+        default=60,
+        ge=10,
+        le=300,
+        description="Heartbeat interval in seconds",
+    )
+    daemon_command_poll_interval: int = Field(
+        default=60,
+        ge=10,
+        le=300,
+        description="Command polling interval in seconds",
+    )
+    daemon_update_check_interval: int = Field(
+        default=3600,
+        ge=300,
+        le=86400,
+        description="Update check interval in seconds",
+    )
+    daemon_auto_update: bool = Field(
+        default=True,
+        description="Enable automatic updates",
+    )
+
+    # ==================== Client Identity ====================
+    client_name: str = Field(
+        default="",
+        description="Human-readable client name (auto-generated if empty)",
+    )
+
     # ==================== Validators ====================
 
     @field_validator("time_window_start", "time_window_end", mode="before")

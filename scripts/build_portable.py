@@ -100,7 +100,8 @@ def setup_python(build_dir: Path) -> Path:
         # Add paths
         if "Lib\\site-packages" not in content:
             content += "\nLib\\site-packages\n"
-        content += "..\\eskimos\n"
+        # Add parent directory (where eskimos folder is) so Python can find the module
+        content += "..\n"
         pth_file.write_text(content)
 
     # Download get-pip.py
@@ -309,6 +310,183 @@ if not exist config\.env (
     echo ESKIMOS_MODEM_PHONE=886480453 >> config\.env
 )
 notepad config\.env
+''', encoding='utf-8')
+
+    # DAEMON.bat - Phone Home Daemon
+    daemon_bat = build_dir / "DAEMON.bat"
+    daemon_bat.write_text(r'''@echo off
+title Eskimos Daemon
+cd /d "%~dp0"
+
+:: Set paths
+set PYTHON=%~dp0python\pythonw.exe
+set CHROMIUM=%~dp0chromium\chrome.exe
+set ESKIMOS=%~dp0eskimos
+
+:: Set environment
+set PYPPETEER_EXECUTABLE_PATH=%CHROMIUM%
+set PYTHONPATH=%ESKIMOS%
+
+echo.
+echo ========================================
+echo    ESKIMOS DAEMON (Phone Home)
+echo ========================================
+echo.
+echo Starting daemon in background...
+
+:: Start daemon
+start "Eskimos Daemon" /min cmd /c ""%~dp0python\python.exe" -m eskimos.infrastructure.daemon start"
+
+echo.
+echo Daemon started!
+echo - Heartbeat: every 60 seconds
+echo - Commands: polled every 60 seconds
+echo - Auto-update: enabled
+echo.
+echo To stop: taskkill /f /fi "WINDOWTITLE eq Eskimos Daemon*"
+pause
+''', encoding='utf-8')
+
+    # START_ALL.bat - Start Gateway + Daemon
+    start_all_bat = build_dir / "START_ALL.bat"
+    start_all_bat.write_text(r'''@echo off
+title Eskimos Gateway + Daemon
+cd /d "%~dp0"
+
+:: Set paths
+set PYTHON=%~dp0python\python.exe
+set PYTHONW=%~dp0python\pythonw.exe
+set CHROMIUM=%~dp0chromium\chrome.exe
+set ESKIMOS=%~dp0eskimos
+
+:: Set environment
+set PYPPETEER_EXECUTABLE_PATH=%CHROMIUM%
+set PYTHONPATH=%ESKIMOS%
+
+echo.
+echo ========================================
+echo    ESKIMOS FULL STARTUP
+echo ========================================
+echo.
+
+:: 1. Start Daemon (background)
+echo [1/2] Starting Daemon...
+start "Eskimos Daemon" /min cmd /c ""%PYTHON%" -m eskimos.infrastructure.daemon start"
+timeout /t 2 /nobreak >nul
+
+:: 2. Start Gateway (background)
+echo [2/2] Starting Gateway...
+start "Eskimos Server" /min cmd /c ""%PYTHON%" -m eskimos.cli.main serve --host 0.0.0.0 --port 8000"
+timeout /t 3 /nobreak >nul
+
+:: 3. Open Dashboard
+start http://localhost:8000/dashboard
+
+echo.
+echo ========================================
+echo    ALL SERVICES STARTED
+echo ========================================
+echo.
+echo - Daemon: Running (heartbeat + updates)
+echo - Gateway: http://localhost:8000
+echo - Dashboard: Opened in browser
+echo.
+echo To stop all: Run STOP_ALL.bat
+pause
+''', encoding='utf-8')
+
+    # STOP_ALL.bat - Stop everything
+    stop_all_bat = build_dir / "STOP_ALL.bat"
+    stop_all_bat.write_text(r'''@echo off
+echo Stopping all Eskimos services...
+
+:: Stop by window title
+taskkill /f /fi "WINDOWTITLE eq Eskimos*" 2>nul
+
+:: Stop Python processes (fallback)
+taskkill /f /im python.exe /fi "WINDOWTITLE eq *Eskimos*" 2>nul
+taskkill /f /im pythonw.exe 2>nul
+
+:: Remove PID file
+if exist .daemon.pid del .daemon.pid
+
+echo.
+echo All services stopped.
+pause
+''', encoding='utf-8')
+
+    # INSTALL_SERVICE.bat - Install as Windows Service (requires NSSM)
+    install_svc_bat = build_dir / "INSTALL_SERVICE.bat"
+    install_svc_bat.write_text(r'''@echo off
+:: ============================================
+:: Install Eskimos as Windows Services
+:: Requires NSSM (https://nssm.cc/)
+:: ============================================
+
+cd /d "%~dp0"
+
+:: Check for admin rights
+net session >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: This script requires Administrator privileges!
+    echo Right-click and select "Run as administrator"
+    pause
+    exit /b 1
+)
+
+:: Check for NSSM
+where nssm >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: NSSM not found!
+    echo.
+    echo Download from: https://nssm.cc/download
+    echo Extract nssm.exe to this folder or add to PATH
+    pause
+    exit /b 1
+)
+
+set PYTHON=%~dp0python\python.exe
+set ESKIMOS=%~dp0eskimos
+
+echo.
+echo Installing Eskimos Gateway service...
+nssm install EskimosGateway "%PYTHON%"
+nssm set EskimosGateway AppParameters "-m eskimos.cli.main serve --host 0.0.0.0 --port 8000"
+nssm set EskimosGateway AppDirectory "%~dp0"
+nssm set EskimosGateway AppEnvironmentExtra "PYTHONPATH=%ESKIMOS%" "PYPPETEER_EXECUTABLE_PATH=%~dp0chromium\chrome.exe"
+nssm set EskimosGateway Start SERVICE_AUTO_START
+nssm set EskimosGateway DisplayName "Eskimos SMS Gateway"
+nssm set EskimosGateway Description "SMS Gateway with AI-powered responses"
+
+echo.
+echo Installing Eskimos Daemon service...
+nssm install EskimosDaemon "%PYTHON%"
+nssm set EskimosDaemon AppParameters "-m eskimos.infrastructure.daemon start"
+nssm set EskimosDaemon AppDirectory "%~dp0"
+nssm set EskimosDaemon AppEnvironmentExtra "PYTHONPATH=%ESKIMOS%"
+nssm set EskimosDaemon Start SERVICE_AUTO_START
+nssm set EskimosDaemon DisplayName "Eskimos Phone-Home Daemon"
+nssm set EskimosDaemon Description "Heartbeat and remote update daemon"
+
+echo.
+echo ========================================
+echo    SERVICES INSTALLED
+echo ========================================
+echo.
+echo Starting services...
+nssm start EskimosGateway
+nssm start EskimosDaemon
+
+echo.
+echo Done! Services will auto-start on boot.
+echo.
+echo Management:
+echo   nssm status EskimosGateway
+echo   nssm stop EskimosGateway
+echo   nssm start EskimosGateway
+echo   nssm remove EskimosGateway confirm
+echo.
+pause
 ''', encoding='utf-8')
 
 
