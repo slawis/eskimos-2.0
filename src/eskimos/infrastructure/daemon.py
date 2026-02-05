@@ -314,7 +314,17 @@ async def execute_command(client_key: str, command: dict) -> None:
             success = await perform_update(payload.get("version"))
             await acknowledge_command(client_key, cmd_id, success, None if success else "Update failed")
             if success:
-                log("Update complete, restarting...")
+                log("Update complete, restarting Gateway + Daemon...")
+                # Restart Gateway service first (picks up new Python code)
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["nssm", "restart", "EskimosGateway"],
+                        timeout=30, capture_output=True
+                    )
+                    log("Gateway service restarted")
+                except Exception as e:
+                    log(f"Gateway restart skipped: {e}")
                 await asyncio.sleep(2)
                 graceful_shutdown()
             else:
@@ -325,6 +335,20 @@ async def execute_command(client_key: str, command: dict) -> None:
             log("Restart requested, shutting down...")
             await asyncio.sleep(1)
             graceful_shutdown()
+
+        elif cmd_type == "restart_gateway":
+            # Restart EskimosGateway NSSM service (picks up new code)
+            import subprocess
+            try:
+                subprocess.run(
+                    ["nssm", "restart", "EskimosGateway"],
+                    timeout=30, capture_output=True
+                )
+                log("Gateway service restarted")
+                await acknowledge_command(client_key, cmd_id, True)
+            except Exception as e:
+                log(f"Gateway restart failed: {e}")
+                await acknowledge_command(client_key, cmd_id, False, str(e))
 
         elif cmd_type == "config":
             # Apply new config values
