@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -51,72 +51,157 @@ class HealthResponse(BaseModel):
     api_available: bool = True
 
 
-def detect_modem_hardware() -> dict:
-    """Detect USB modem model and manufacturer from Windows PnP devices.
+async def detect_modem_via_http(host: str, port: int, timeout: float) -> dict:
+    """Detect modem model by querying its web panel via HTTP.
 
-    Uses wmic to scan network adapters for RNDIS/modem devices.
-    Wrapped in try/except at every level - safe for Windows Service context.
+    Connects to the modem's web interface, reads the HTML response,
+    and extracts model/manufacturer from page content and headers.
+    Works in any context (service, terminal, etc.) - no WMI needed.
     """
-    global _modem_hw_cache
-    if _modem_hw_cache is not None:
-        return _modem_hw_cache
-
-    result = {"model": "", "manufacturer": "", "connection_type": ""}
-
-    if sys.platform != "win32":
-        _modem_hw_cache = result
-        return result
+    result = {"model": "", "manufacturer": "", "connection_type": "RNDIS/USB"}
 
     try:
-        import subprocess
-
-        # Query network adapters for RNDIS/modem devices
-        proc = subprocess.run(
-            ["wmic", "nic", "get", "Name,Manufacturer,PNPDeviceID", "/format:csv"],
-            capture_output=True, text=True, timeout=10,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
         )
-        if proc.returncode == 0:
-            for line in proc.stdout.strip().split("\n"):
-                line_lower = line.lower()
-                if any(kw in line_lower for kw in ["ndis", "rndis", "mobile", "lte", "4g", "gsm"]):
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 4:
-                        result["manufacturer"] = parts[1] or ""
-                        result["connection_type"] = "RNDIS/USB"
-                        adapter_name = parts[2]
-                        if adapter_name:
-                            result["model"] = adapter_name
-                        break
 
-        # Try to get more detailed USB device info
-        if result["manufacturer"] or result["model"]:
-            try:
-                proc2 = subprocess.run(
-                    ["wmic", "path", "Win32_PnPEntity", "where",
-                     "Name like '%NDIS%' or Name like '%RNDIS%' or Name like '%Mobile%' or Name like '%LTE%'",
-                     "get", "Name,Manufacturer,Description", "/format:csv"],
-                    capture_output=True, text=True, timeout=10,
-                    creationflags=0x08000000,
-                )
-                if proc2.returncode == 0:
-                    for line in proc2.stdout.strip().split("\n"):
-                        line_lower = line.lower()
-                        if any(kw in line_lower for kw in ["ndis", "rndis", "mobile", "lte"]):
-                            parts = [p.strip() for p in line.split(",")]
-                            if len(parts) >= 4:
-                                if parts[2]:
-                                    result["manufacturer"] = parts[2]
-                                if parts[3]:
-                                    result["model"] = parts[3]
-                            break
-            except Exception:
-                pass  # PnP query is optional
+        # Send HTTP GET for main page
+        request = f"GET / HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\n\r\n"
+        writer.write(request.encode())
+        await writer.drain()
+
+        # Read response (8KB enough for headers + start of HTML)
+        data = await asyncio.wait_for(reader.read(8192), timeout=timeout)
+        writer.close()
+        await writer.wait_closed()
+
+        html = data.decode("utf-8", errors="ignore")
+
+        # Extract from HTTP headers (Server header often has model)
+        server_match = re.search(r"Server:\s*(.+)", html, re.IGNORECASE)
+        if server_match:
+            server = server_match.group(1).strip()
+            if server and server.lower() not in ("", "nginx", "apache", "lighttpd"):
+                result["model"] = server
+
+        # Extract from HTML title
+        title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+            if title and title.lower() not in ("", "home", "index", "login"):
+                if not result["model"]:
+                    result["model"] = title
+
+        # Search for device/model info in JavaScript variables
+        for pattern in [
+            r'device[_\-]?[Nn]ame["\s:=]+["\']([^"\']+)',
+            r'[Mm]odel[_\-]?[Nn]ame["\s:=]+["\']([^"\']+)',
+            r'product[_\-]?[Nn]ame["\s:=]+["\']([^"\']+)',
+            r'"model"\s*:\s*"([^"]+)"',
+            r'"deviceName"\s*:\s*"([^"]+)"',
+            r'"DeviceName"\s*:\s*"([^"]+)"',
+        ]:
+            m = re.search(pattern, html)
+            if m:
+                result["model"] = m.group(1).strip()
+                break
+
+        # Search for manufacturer
+        for pattern in [
+            r'[Mm]anufacturer["\s:=]+["\']([^"\']+)',
+            r'"manufacturer"\s*:\s*"([^"]+)"',
+            r'"vendor"\s*:\s*"([^"]+)"',
+        ]:
+            m = re.search(pattern, html)
+            if m:
+                result["manufacturer"] = m.group(1).strip()
+                break
+
+        # Try known modem API endpoints if main page didn't yield results
+        if not result["model"]:
+            result = await _try_modem_apis(host, port, timeout, result)
 
     except Exception as e:
-        logger.warning(f"Modem hardware detection failed: {e}")
+        logger.debug(f"HTTP modem detection failed: {e}")
 
-    _modem_hw_cache = result
+    return result
+
+
+async def _try_modem_apis(host: str, port: int, timeout: float, result: dict) -> dict:
+    """Try known REST API endpoints for common modem brands."""
+    api_endpoints = [
+        # TCL / Alcatel
+        ("/jrd/webapi?api=GetSystemInfo", "tcl"),
+        ("/api/device/information", "generic"),
+        # Huawei HiLink
+        ("/api/device/basic_information", "huawei"),
+        # ZTE
+        ("/goform/goform_get_cmd_process?cmd=manufacturer_name,model_name", "zte"),
+    ]
+
+    for path, brand in api_endpoints:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=timeout
+            )
+            request = f"GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\n\r\n"
+            writer.write(request.encode())
+            await writer.drain()
+
+            data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+            writer.close()
+            await writer.wait_closed()
+
+            body = data.decode("utf-8", errors="ignore")
+
+            # Skip if 404 or error
+            if "404" in body[:30] or "error" in body[:50].lower():
+                continue
+
+            # Parse JSON-like responses
+            if brand == "tcl":
+                m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', body)
+                if m:
+                    result["model"] = m.group(1)
+                m = re.search(r'"Manufacturer"\s*:\s*"([^"]+)"', body)
+                if m:
+                    result["manufacturer"] = m.group(1)
+                if result["model"]:
+                    break
+
+            elif brand == "huawei":
+                m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', body)
+                if not m:
+                    m = re.search(r'"devicename"\s*:\s*"([^"]+)"', body, re.IGNORECASE)
+                if m:
+                    result["model"] = m.group(1)
+                    result["manufacturer"] = "Huawei"
+                    break
+
+            elif brand == "zte":
+                m = re.search(r'"model_name"\s*:\s*"([^"]+)"', body)
+                if m:
+                    result["model"] = m.group(1)
+                m = re.search(r'"manufacturer_name"\s*:\s*"([^"]+)"', body)
+                if m:
+                    result["manufacturer"] = m.group(1)
+                if result["model"]:
+                    break
+
+            else:
+                # Generic: try to find model/manufacturer in any JSON
+                m = re.search(r'"[Mm]odel[^"]*"\s*:\s*"([^"]+)"', body)
+                if m:
+                    result["model"] = m.group(1)
+                m = re.search(r'"[Mm]anufacturer[^"]*"\s*:\s*"([^"]+)"', body)
+                if m:
+                    result["manufacturer"] = m.group(1)
+                if result["model"]:
+                    break
+
+        except Exception:
+            continue
+
     return result
 
 
@@ -142,14 +227,23 @@ async def probe_modem(host: str, port: int, timeout: float) -> bool:
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     """Check API health, modem connectivity and hardware info."""
+    global _modem_hw_cache
+
     modem_reachable = await probe_modem(MODEM_HOST, MODEM_PORT, MODEM_PROBE_TIMEOUT)
 
-    try:
-        hw = detect_modem_hardware()
-    except Exception:
-        hw = {"model": "", "manufacturer": "", "connection_type": ""}
+    hw = {"model": "", "manufacturer": "", "connection_type": ""}
 
-    if not modem_reachable:
+    if modem_reachable:
+        # Use cache if available
+        if _modem_hw_cache is not None:
+            hw = _modem_hw_cache
+        else:
+            try:
+                hw = await detect_modem_via_http(MODEM_HOST, MODEM_PORT, MODEM_PROBE_TIMEOUT)
+                _modem_hw_cache = hw
+            except Exception:
+                pass
+    else:
         clear_modem_cache()
 
     return HealthResponse(
