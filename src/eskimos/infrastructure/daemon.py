@@ -278,16 +278,21 @@ async def poll_commands(client_key: str) -> list:
     return []
 
 
-async def acknowledge_command(client_key: str, command_id: str, success: bool, error: str = None) -> None:
-    """Acknowledge command execution."""
+async def acknowledge_command(client_key: str, command_id: str, success: bool,
+                              error: str = None, result: dict = None) -> None:
+    """Acknowledge command execution with optional result data."""
     if not HAS_HTTPX:
         return
 
     try:
+        payload = {"success": success, "error": error}
+        if result is not None:
+            payload["result"] = result
+
         async with httpx.AsyncClient() as client:
             await client.post(
                 f"{CENTRAL_API}/commands/{command_id}/ack",
-                json={"success": success, "error": error},
+                json=payload,
                 headers={"X-Client-Key": client_key, "X-API-Key": HEARTBEAT_API_KEY},
                 timeout=10.0
             )
@@ -329,10 +334,10 @@ async def execute_command(client_key: str, command: dict) -> None:
             log(f"Config updated: {list(new_config.keys())}")
 
         elif cmd_type == "diagnostic":
-            # Run diagnostic and report
+            # Run diagnostic and report results back to server
             diag = await run_diagnostic()
-            await acknowledge_command(client_key, cmd_id, True)
-            log(f"Diagnostic complete: {diag}")
+            await acknowledge_command(client_key, cmd_id, True, result=diag)
+            log(f"Diagnostic complete")
 
         else:
             log(f"Unknown command type: {cmd_type}")
@@ -371,13 +376,28 @@ def apply_config(new_config: dict) -> None:
 
 
 async def run_diagnostic() -> dict:
-    """Run diagnostic checks."""
+    """Run diagnostic checks including modem debug data."""
     modem = await get_modem_status()
     metrics = await get_sms_metrics()
     system = get_system_info()
 
+    # Try to get modem debug data from local Gateway API
+    modem_debug = {}
+    try:
+        if HAS_HTTPX:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "http://localhost:8000/api/modem/debug",
+                    timeout=15.0
+                )
+                if response.status_code == 200:
+                    modem_debug = response.json()
+    except Exception as e:
+        modem_debug = {"error": str(e)}
+
     return {
         "modem": modem,
+        "modem_debug": modem_debug,
         "metrics": metrics,
         "system": system,
         "timestamp": datetime.utcnow().isoformat(),
