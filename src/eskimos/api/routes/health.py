@@ -23,7 +23,7 @@ MODEM_HOST = os.environ.get("MODEM_HOST", "192.168.1.1")
 MODEM_PORT = int(os.environ.get("MODEM_PORT", "80"))
 MODEM_PHONE = os.environ.get("MODEM_PHONE_NUMBER", "886480453")
 MODEM_TYPE = os.environ.get("MODEM_TYPE", "puppeteer")
-MODEM_PROBE_TIMEOUT = float(os.environ.get("MODEM_PROBE_TIMEOUT", "3.0"))
+MODEM_PROBE_TIMEOUT = float(os.environ.get("MODEM_PROBE_TIMEOUT", "5.0"))
 
 # Cache for hardware detection
 _modem_hw_cache: Optional[dict] = None
@@ -62,21 +62,7 @@ async def detect_modem_via_http(host: str, port: int, timeout: float) -> dict:
     result = {"model": "", "manufacturer": "", "connection_type": "RNDIS/USB"}
 
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout=timeout
-        )
-
-        # Send HTTP GET for main page
-        request = f"GET / HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\n\r\n"
-        writer.write(request.encode())
-        await writer.drain()
-
-        # Read response (8KB enough for headers + start of HTML)
-        data = await asyncio.wait_for(reader.read(8192), timeout=timeout)
-        writer.close()
-        await writer.wait_closed()
-
-        html = data.decode("utf-8", errors="ignore")
+        html = await _http_request(host, port, "GET", "/", timeout=timeout)
 
         # Extract from HTTP headers (Server header often has model)
         server_match = re.search(r"Server:\s*(.+)", html, re.IGNORECASE)
@@ -130,8 +116,9 @@ async def detect_modem_via_http(host: str, port: int, timeout: float) -> dict:
 
 async def _http_request(host: str, port: int, method: str, path: str,
                         body: str = "", timeout: float = 3.0,
-                        content_type: str = "application/json") -> str:
-    """Send raw HTTP request and return response body."""
+                        content_type: str = "application/json",
+                        extra_headers: str = "") -> str:
+    """Send raw HTTP request and return full response."""
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(host, port), timeout=timeout
     )
@@ -139,43 +126,18 @@ async def _http_request(host: str, port: int, method: str, path: str,
     headers = f"{method} {path} HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\n"
     if body:
         headers += f"Content-Type: {content_type}\r\nContent-Length: {len(body)}\r\n"
+    if extra_headers:
+        headers += extra_headers
     headers += "\r\n"
 
     writer.write(headers.encode() + body.encode())
     await writer.drain()
 
-    data = await asyncio.wait_for(reader.read(8192), timeout=timeout)
-    writer.close()
-    await writer.wait_closed()
-
-    return data.decode("utf-8", errors="ignore")
-
-
-async def _tcl_api_call(host: str, port: int, timeout: float,
-                        token: str, method: str, params: dict = None) -> str:
-    """Make a TCL JRD webapi call with proper auth headers."""
-    params = params or {}
-    json_body = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": "1"})
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(host, port), timeout=timeout
-    )
-    request = (
-        f"POST /jrd/webapi HTTP/1.0\r\n"
-        f"Host: {host}\r\n"
-        f"Content-Type: application/json\r\n"
-        f"Content-Length: {len(json_body)}\r\n"
-        f"_TclRequestVerificationKey: {token}\r\n"
-        f"Referer: http://{host}/index.html\r\n"
-        f"\r\n"
-        f"{json_body}"
-    )
-    writer.write(request.encode())
-    await writer.drain()
-
+    # Read full response (loop until EOF or timeout)
     chunks = []
     try:
         while True:
-            chunk = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+            chunk = await asyncio.wait_for(reader.read(8192), timeout=timeout)
             if not chunk:
                 break
             chunks.append(chunk)
@@ -188,6 +150,19 @@ async def _tcl_api_call(host: str, port: int, timeout: float,
         pass
 
     return b"".join(chunks).decode("utf-8", errors="ignore")
+
+
+async def _tcl_api_call(host: str, port: int, timeout: float,
+                        token: str, method: str, params: dict = None) -> str:
+    """Make a TCL JRD webapi call with proper auth headers."""
+    params = params or {}
+    json_body = json.dumps({"jsonrpc": "2.0", "method": method, "params": params, "id": "1"})
+    extra = (
+        f"_TclRequestVerificationKey: {token}\r\n"
+        f"Referer: http://{host}/index.html\r\n"
+    )
+    return await _http_request(host, port, "POST", "/jrd/webapi",
+                               body=json_body, timeout=timeout, extra_headers=extra)
 
 
 async def _try_modem_apis(host: str, port: int, timeout: float, result: dict) -> dict:
