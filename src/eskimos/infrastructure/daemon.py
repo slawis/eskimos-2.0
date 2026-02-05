@@ -376,7 +376,7 @@ def apply_config(new_config: dict) -> None:
 
 
 async def probe_modem_debug() -> dict:
-    """Directly probe modem HTTP endpoints using httpx with TCL token auth."""
+    """Directly probe modem HTTP endpoints - login first, then query."""
     if not HAS_HTTPX:
         return {"error": "httpx not available"}
 
@@ -394,17 +394,37 @@ async def probe_modem_debug() -> dict:
             if m:
                 token = m.group(1)
                 results["tcl_token"] = token
+                results["is_tcl"] = True
         except Exception as e:
             results["main_page_error"] = str(e)
 
-        # TCL API methods with verification token
         if token:
-            tcl_methods = ["GetSystemInfo", "GetDeviceInfo",
-                           "GetCurrentLanguage", "GetNetworkInfo",
-                           "GetConnectionState"]
             headers = {"_TclRequestVerificationKey": token}
 
-            for method in tcl_methods:
+            # Try Login with default passwords
+            passwords = ["admin", "", "1234", "password"]
+            logged_in = False
+            for pwd in passwords:
+                try:
+                    login_body = {
+                        "jsonrpc": "2.0",
+                        "method": "Login",
+                        "params": {"UserName": "admin", "Password": pwd},
+                        "id": "1"
+                    }
+                    resp = await client.post(f"{base_url}/jrd/webapi",
+                                             json=login_body, headers=headers)
+                    results[f"login_{pwd or 'empty'}"] = resp.text[:500]
+                    if '"result"' in resp.text and "error" not in resp.text.lower():
+                        logged_in = True
+                        results["login_success"] = f"password={pwd or '(empty)'}"
+                        break
+                except Exception as e:
+                    results[f"login_{pwd}_error"] = str(e)
+
+            # Try API methods (whether logged in or not - for debugging)
+            methods = ["GetSystemInfo", "GetDeviceInfo"]
+            for method in methods:
                 try:
                     body = {"jsonrpc": "2.0", "method": method, "params": {}, "id": "1"}
                     resp = await client.post(f"{base_url}/jrd/webapi",
@@ -412,6 +432,15 @@ async def probe_modem_debug() -> dict:
                     results[f"tcl_{method}"] = resp.text[:2000]
                 except Exception as e:
                     results[f"tcl_{method}"] = f"ERROR: {e}"
+
+            # Logout if logged in
+            if logged_in:
+                try:
+                    body = {"jsonrpc": "2.0", "method": "Logout", "params": {}, "id": "1"}
+                    await client.post(f"{base_url}/jrd/webapi",
+                                      json=body, headers=headers)
+                except Exception:
+                    pass
 
     return results
 
