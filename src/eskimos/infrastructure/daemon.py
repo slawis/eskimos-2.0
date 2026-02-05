@@ -375,67 +375,42 @@ def apply_config(new_config: dict) -> None:
         log(f"Config apply error: {e}")
 
 
-async def _raw_http_request(host: str, port: int, method: str, path: str,
-                            body: str = "", timeout: float = 5.0) -> str:
-    """Send raw HTTP request and return full response."""
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(host, port), timeout=timeout
-    )
-    headers = f"{method} {path} HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\n"
-    if body:
-        headers += f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
-    headers += "\r\n"
-    writer.write(headers.encode() + body.encode())
-    await writer.drain()
-    data = await asyncio.wait_for(reader.read(8192), timeout=timeout)
-    writer.close()
-    await writer.wait_closed()
-    return data.decode("utf-8", errors="ignore")
-
-
 async def probe_modem_debug() -> dict:
-    """Directly probe modem HTTP endpoints for debug data."""
+    """Directly probe modem HTTP endpoints using httpx."""
+    if not HAS_HTTPX:
+        return {"error": "httpx not available"}
+
     results = {}
-    host = MODEM_HOST
-    port = MODEM_PORT
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
 
-    # TCL unauthenticated API methods
-    tcl_methods = [
-        "GetCurrentLanguage",
-        "GetLoginState",
-        "GetSimStatus",
-        "GetNetworkInfo",
-        "GetConnectionState",
-        "GetDeviceNewVersion",
-        "GetWPSStatus",
-        "GetNetworkRegisterState",
-    ]
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+        # TCL unauthenticated API methods
+        tcl_methods = [
+            "GetCurrentLanguage",
+            "GetLoginState",
+            "GetSimStatus",
+            "GetNetworkInfo",
+            "GetConnectionState",
+            "GetDeviceNewVersion",
+            "GetNetworkRegisterState",
+        ]
 
-    for method in tcl_methods:
+        for method in tcl_methods:
+            try:
+                body = {"jsonrpc": "2.0", "method": method, "params": {}, "id": "1"}
+                resp = await client.post(f"{base_url}/jrd/webapi", json=body)
+                results[f"tcl_{method}"] = resp.text[:2000]
+            except Exception as e:
+                results[f"tcl_{method}"] = f"ERROR: {e}"
+
+        # Main page (follows redirects)
         try:
-            body = f'{{"jsonrpc":"2.0","method":"{method}","params":{{}},"id":"1"}}'
-            resp = await _raw_http_request(host, port, "POST", "/jrd/webapi", body=body)
-            results[f"tcl_{method}"] = resp[:2000]
+            resp = await client.get(base_url)
+            results["main_page_url"] = str(resp.url)
+            results["main_page_status"] = resp.status_code
+            results["main_page_html"] = resp.text[:3000]
         except Exception as e:
-            results[f"tcl_{method}"] = f"ERROR: {e}"
-
-    # Follow redirect - get login page
-    try:
-        resp = await _raw_http_request(host, port, "GET", "/")
-        # Extract redirect location
-        import re
-        loc = re.search(r'Location:\s*(\S+)', resp)
-        if loc:
-            redirect_path = loc.group(1)
-            results["redirect_to"] = redirect_path
-            # Follow redirect
-            if redirect_path.startswith("/"):
-                resp2 = await _raw_http_request(host, port, "GET", redirect_path)
-                results["login_page"] = resp2[:3000]
-        else:
-            results["main_page"] = resp[:3000]
-    except Exception as e:
-        results["main_page_error"] = f"ERROR: {e}"
+            results["main_page"] = f"ERROR: {e}"
 
     return results
 
