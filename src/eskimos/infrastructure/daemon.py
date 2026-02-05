@@ -376,35 +376,83 @@ def apply_config(new_config: dict) -> None:
 
 
 async def probe_modem_debug() -> dict:
-    """Directly probe modem HTTP endpoints - login first, then query."""
+    """Probe modem for model info via HTML/JS files and hashed login."""
     if not HAS_HTTPX:
         return {"error": "httpx not available"}
 
     import re
+    import hashlib
+    import base64
     results = {}
     base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
 
     async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-        # Get main page and extract TCL verification token
+        # Get main page (full HTML)
         token = ""
         try:
             resp = await client.get(base_url)
-            results["main_page_url"] = str(resp.url)
-            m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+            html = resp.text
+            results["html_length"] = len(html)
+
+            # Extract token
+            m = re.search(r'name="header-meta"\s+content="([^"]+)"', html)
             if m:
                 token = m.group(1)
                 results["tcl_token"] = token
-                results["is_tcl"] = True
+
+            # Extract all script src URLs
+            scripts = re.findall(r'src="([^"]+\.js[^"]*)"', html)
+            results["js_files"] = scripts[:10]
+
+            # Look for model/device info in HTML
+            for pattern in [
+                r'device[_\-]?[Nn]ame["\s:=]+["\']([^"\']+)',
+                r'[Mm]odel[_\-]?[Nn]ame["\s:=]+["\']([^"\']+)',
+                r'product[_\-]?[Nn]ame["\s:=]+["\']([^"\']+)',
+            ]:
+                m2 = re.search(pattern, html)
+                if m2:
+                    results["html_model"] = m2.group(1)
+                    break
         except Exception as e:
             results["main_page_error"] = str(e)
 
-        if token:
-            headers = {"_TclRequestVerificationKey": token}
+        # Fetch JS files that might contain model info
+        js_paths = [
+            "/js/home.js", "/js/app.js", "/js/main.js",
+            "/js/config.js", "/js/device.js", "/js/status.js",
+        ]
+        for path in js_paths:
+            try:
+                resp = await client.get(f"{base_url}{path}")
+                if resp.status_code == 200 and len(resp.text) > 10:
+                    # Search for model info in JS
+                    for pat in [r'"DeviceName"\s*:\s*"([^"]+)"',
+                                r'"model"\s*:\s*"([^"]+)"',
+                                r'IK\d+\w+', r'MW\d+\w+', r'MR\d+\w+']:
+                        m = re.search(pat, resp.text)
+                        if m:
+                            results[f"js_{path}_match"] = m.group(0)[:200]
+                            break
+                    if f"js_{path}_match" not in results:
+                        results[f"js_{path}_size"] = len(resp.text)
+            except Exception:
+                pass
 
-            # Try Login with default passwords
-            passwords = ["admin", "", "1234", "password"]
-            logged_in = False
-            for pwd in passwords:
+        # Try login with hashed passwords
+        if token:
+            headers = {
+                "_TclRequestVerificationKey": token,
+                "Referer": f"http://{MODEM_HOST}/index.html",
+            }
+            # TCL modems often require base64 or SHA256 hashed password
+            pwd_variants = [
+                ("admin_plain", "admin"),
+                ("admin_b64", base64.b64encode(b"admin").decode()),
+                ("admin_sha256", hashlib.sha256(b"admin").hexdigest()),
+                ("empty_plain", ""),
+            ]
+            for name, pwd in pwd_variants:
                 try:
                     login_body = {
                         "jsonrpc": "2.0",
@@ -414,33 +462,23 @@ async def probe_modem_debug() -> dict:
                     }
                     resp = await client.post(f"{base_url}/jrd/webapi",
                                              json=login_body, headers=headers)
-                    results[f"login_{pwd or 'empty'}"] = resp.text[:500]
-                    if '"result"' in resp.text and "error" not in resp.text.lower():
-                        logged_in = True
-                        results["login_success"] = f"password={pwd or '(empty)'}"
+                    resp_text = resp.text[:300]
+                    results[f"login_{name}"] = resp_text
+                    if "result" in resp_text and "error" not in resp_text.lower():
+                        # Login success - try GetSystemInfo
+                        body = {"jsonrpc": "2.0", "method": "GetSystemInfo",
+                                "params": {}, "id": "1"}
+                        resp2 = await client.post(f"{base_url}/jrd/webapi",
+                                                  json=body, headers=headers)
+                        results["system_info_after_login"] = resp2.text[:2000]
+                        # Logout
+                        await client.post(f"{base_url}/jrd/webapi",
+                                          json={"jsonrpc": "2.0", "method": "Logout",
+                                                "params": {}, "id": "1"},
+                                          headers=headers)
                         break
                 except Exception as e:
-                    results[f"login_{pwd}_error"] = str(e)
-
-            # Try API methods (whether logged in or not - for debugging)
-            methods = ["GetSystemInfo", "GetDeviceInfo"]
-            for method in methods:
-                try:
-                    body = {"jsonrpc": "2.0", "method": method, "params": {}, "id": "1"}
-                    resp = await client.post(f"{base_url}/jrd/webapi",
-                                             json=body, headers=headers)
-                    results[f"tcl_{method}"] = resp.text[:2000]
-                except Exception as e:
-                    results[f"tcl_{method}"] = f"ERROR: {e}"
-
-            # Logout if logged in
-            if logged_in:
-                try:
-                    body = {"jsonrpc": "2.0", "method": "Logout", "params": {}, "id": "1"}
-                    await client.post(f"{base_url}/jrd/webapi",
-                                      json=body, headers=headers)
-                except Exception:
-                    pass
+                    results[f"login_{name}_error"] = str(e)
 
     return results
 
