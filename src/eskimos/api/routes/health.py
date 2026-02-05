@@ -150,40 +150,148 @@ async def _http_request(host: str, port: int, method: str, path: str,
     return data.decode("utf-8", errors="ignore")
 
 
-async def _try_modem_apis(host: str, port: int, timeout: float, result: dict) -> dict:
-    """Try known REST API endpoints for common modem brands."""
+async def _try_tcl_with_token(host: str, port: int, timeout: float,
+                               result: dict, token: str) -> dict:
+    """Try TCL API methods with the verification token."""
+    tcl_methods = ["GetSystemInfo", "GetDeviceInfo", "GetDeviceNewVersion"]
 
-    # TCL / Alcatel - uses POST with JSON-RPC
-    tcl_methods = [
-        ("GetSystemInfo", ["DeviceName", "Manufacturer", "FwVersion"]),
-        ("GetDeviceInfo", ["DeviceName", "Manufacturer"]),
-        ("GetCurrentLanguage", []),  # fallback to confirm it's TCL
-    ]
-
-    for method_name, _ in tcl_methods:
+    for method_name in tcl_methods:
         try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=timeout
+            )
             json_body = f'{{"jsonrpc":"2.0","method":"{method_name}","params":{{}},"id":"1"}}'
-            resp = await _http_request(host, port, "POST", "/jrd/webapi",
-                                       body=json_body, timeout=timeout)
-            if "404" in resp[:30] or "error" in resp[:100].lower():
+            request = (
+                f"POST /jrd/webapi HTTP/1.0\r\n"
+                f"Host: {host}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(json_body)}\r\n"
+                f"_TclRequestVerificationKey: {token}\r\n"
+                f"\r\n"
+                f"{json_body}"
+            )
+            writer.write(request.encode())
+            await writer.drain()
+
+            # Read full response
+            chunks = []
+            try:
+                while True:
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            except (asyncio.TimeoutError, ConnectionError):
+                pass
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+            body = b"".join(chunks).decode("utf-8", errors="ignore")
+
+            # Check for auth failure
+            if "-32697" in body:
                 continue
 
-            # Parse TCL response
-            m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', resp)
+            # Parse response
+            m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', body)
             if m:
                 result["model"] = m.group(1)
-            m = re.search(r'"Manufacturer"\s*:\s*"([^"]+)"', resp)
+            m = re.search(r'"Manufacturer"\s*:\s*"([^"]+)"', body)
             if m:
                 result["manufacturer"] = m.group(1)
             if not result["model"]:
-                m = re.search(r'"[Ff]w[Vv]ersion"\s*:\s*"([^"]+)"', resp)
+                m = re.search(r'"[Ff]w[Vv]ersion"\s*:\s*"([^"]+)"', body)
                 if m:
                     result["model"] = f"TCL ({m.group(1)})"
-                    result["manufacturer"] = "TCL"
+                    result["manufacturer"] = "TCL/Alcatel"
             if result["model"]:
                 return result
         except Exception:
             continue
+
+    return result
+
+
+async def _try_modem_apis(host: str, port: int, timeout: float, result: dict) -> dict:
+    """Try known REST API endpoints for common modem brands."""
+
+    # TCL / Alcatel - needs _TclRequestVerificationKey from main page
+    # First, get the verification token from HTML
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+        request = f"GET / HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\n\r\n"
+        writer.write(request.encode())
+        await writer.drain()
+        chunks = []
+        try:
+            while True:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except (asyncio.TimeoutError, ConnectionError):
+            pass
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+        page = b"".join(chunks).decode("utf-8", errors="ignore")
+
+        # Check if this is a TCL/Alcatel modem (has alcatelLink or header-meta)
+        token_match = re.search(r'name="header-meta"\s+content="([^"]+)"', page)
+        if token_match:
+            token = token_match.group(1)
+            result["manufacturer"] = "Alcatel/TCL"
+            result = await _try_tcl_with_token(host, port, timeout, result, token)
+            if result["model"]:
+                return result
+
+        # If redirect, follow it and check for TCL
+        redirect_match = re.search(r'Location:\s*(\S+)', page)
+        if redirect_match:
+            redirect_path = redirect_match.group(1)
+            if redirect_path.startswith("/"):
+                try:
+                    reader2, writer2 = await asyncio.wait_for(
+                        asyncio.open_connection(host, port), timeout=timeout
+                    )
+                    request2 = f"GET {redirect_path} HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\n\r\n"
+                    writer2.write(request2.encode())
+                    await writer2.drain()
+                    chunks2 = []
+                    try:
+                        while True:
+                            chunk = await asyncio.wait_for(reader2.read(4096), timeout=timeout)
+                            if not chunk:
+                                break
+                            chunks2.append(chunk)
+                    except (asyncio.TimeoutError, ConnectionError):
+                        pass
+                    writer2.close()
+                    try:
+                        await writer2.wait_closed()
+                    except Exception:
+                        pass
+
+                    page2 = b"".join(chunks2).decode("utf-8", errors="ignore")
+                    token_match2 = re.search(r'name="header-meta"\s+content="([^"]+)"', page2)
+                    if token_match2:
+                        token = token_match2.group(1)
+                        result["manufacturer"] = "Alcatel/TCL"
+                        result = await _try_tcl_with_token(host, port, timeout, result, token)
+                        if result["model"]:
+                            return result
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     # Huawei HiLink - GET
     try:
@@ -206,21 +314,6 @@ async def _try_modem_apis(host: str, port: int, timeout: float, result: dict) ->
         if m:
             result["model"] = m.group(1)
         m = re.search(r'"manufacturer_name"\s*:\s*"([^"]+)"', resp)
-        if m:
-            result["manufacturer"] = m.group(1)
-        if result["model"]:
-            return result
-    except Exception:
-        pass
-
-    # Generic - GET /api/device/information
-    try:
-        resp = await _http_request(host, port, "GET",
-                                   "/api/device/information", timeout=timeout)
-        m = re.search(r'"[Mm]odel[^"]*"\s*:\s*"([^"]+)"', resp)
-        if m:
-            result["model"] = m.group(1)
-        m = re.search(r'"[Mm]anufacturer[^"]*"\s*:\s*"([^"]+)"', resp)
         if m:
             result["manufacturer"] = m.group(1)
         if result["model"]:

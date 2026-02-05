@@ -376,41 +376,42 @@ def apply_config(new_config: dict) -> None:
 
 
 async def probe_modem_debug() -> dict:
-    """Directly probe modem HTTP endpoints using httpx."""
+    """Directly probe modem HTTP endpoints using httpx with TCL token auth."""
     if not HAS_HTTPX:
         return {"error": "httpx not available"}
 
+    import re
     results = {}
     base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
 
     async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-        # TCL unauthenticated API methods
-        tcl_methods = [
-            "GetCurrentLanguage",
-            "GetLoginState",
-            "GetSimStatus",
-            "GetNetworkInfo",
-            "GetConnectionState",
-            "GetDeviceNewVersion",
-            "GetNetworkRegisterState",
-        ]
-
-        for method in tcl_methods:
-            try:
-                body = {"jsonrpc": "2.0", "method": method, "params": {}, "id": "1"}
-                resp = await client.post(f"{base_url}/jrd/webapi", json=body)
-                results[f"tcl_{method}"] = resp.text[:2000]
-            except Exception as e:
-                results[f"tcl_{method}"] = f"ERROR: {e}"
-
-        # Main page (follows redirects)
+        # Get main page and extract TCL verification token
+        token = ""
         try:
             resp = await client.get(base_url)
             results["main_page_url"] = str(resp.url)
-            results["main_page_status"] = resp.status_code
-            results["main_page_html"] = resp.text[:3000]
+            m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+            if m:
+                token = m.group(1)
+                results["tcl_token"] = token
         except Exception as e:
-            results["main_page"] = f"ERROR: {e}"
+            results["main_page_error"] = str(e)
+
+        # TCL API methods with verification token
+        if token:
+            tcl_methods = ["GetSystemInfo", "GetDeviceInfo",
+                           "GetCurrentLanguage", "GetNetworkInfo",
+                           "GetConnectionState"]
+            headers = {"_TclRequestVerificationKey": token}
+
+            for method in tcl_methods:
+                try:
+                    body = {"jsonrpc": "2.0", "method": method, "params": {}, "id": "1"}
+                    resp = await client.post(f"{base_url}/jrd/webapi",
+                                             json=body, headers=headers)
+                    results[f"tcl_{method}"] = resp.text[:2000]
+                except Exception as e:
+                    results[f"tcl_{method}"] = f"ERROR: {e}"
 
     return results
 
