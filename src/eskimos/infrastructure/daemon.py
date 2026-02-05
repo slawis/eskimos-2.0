@@ -162,6 +162,9 @@ async def get_modem_status() -> dict:
                 return {
                     "status": "connected" if is_connected else "disconnected",
                     "phone_number": modem.get("phone_number", MODEM_PHONE) if is_connected else "",
+                    "model": modem.get("model", ""),
+                    "manufacturer": modem.get("manufacturer", ""),
+                    "connection_type": modem.get("connection_type", ""),
                 }
     except Exception:
         pass
@@ -171,6 +174,9 @@ async def get_modem_status() -> dict:
     return {
         "status": "connected" if reachable else "disconnected",
         "phone_number": MODEM_PHONE if reachable else "",
+        "model": "",
+        "manufacturer": "",
+        "connection_type": "",
     }
 
 
