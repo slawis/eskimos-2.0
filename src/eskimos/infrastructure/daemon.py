@@ -128,8 +128,27 @@ def get_uptime() -> int:
 
 # ==================== Modem Status ====================
 
+MODEM_HOST = os.getenv("MODEM_HOST", "192.168.1.1")
+MODEM_PORT = int(os.getenv("MODEM_PORT", "80"))
+MODEM_PHONE = os.getenv("MODEM_PHONE_NUMBER", "886480453")
+
+
+async def probe_modem_direct() -> bool:
+    """Direct TCP probe to modem IP - fallback when Gateway API is down."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(MODEM_HOST, MODEM_PORT), timeout=3.0
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except (asyncio.TimeoutError, OSError, ConnectionRefusedError):
+        return False
+
+
 async def get_modem_status() -> dict:
-    """Get modem status from local API."""
+    """Get modem status - first from local API, fallback to direct probe."""
+    # Try local Gateway API first
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -138,14 +157,21 @@ async def get_modem_status() -> dict:
             )
             if response.status_code == 200:
                 data = response.json()
+                modem = data.get("modem", {})
+                is_connected = modem.get("connected", data.get("modem_connected", False))
                 return {
-                    "status": "connected",
-                    "phone_number": data.get("modem", {}).get("phone_number", "unknown"),
+                    "status": "connected" if is_connected else "disconnected",
+                    "phone_number": modem.get("phone_number", MODEM_PHONE) if is_connected else "",
                 }
     except Exception:
         pass
 
-    return {"status": "disconnected"}
+    # Fallback: direct TCP probe to modem IP
+    reachable = await probe_modem_direct()
+    return {
+        "status": "connected" if reachable else "disconnected",
+        "phone_number": MODEM_PHONE if reachable else "",
+    }
 
 
 async def get_sms_metrics() -> dict:
