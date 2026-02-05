@@ -399,42 +399,43 @@ async def probe_modem_debug() -> dict:
     host = MODEM_HOST
     port = MODEM_PORT
 
-    # 1. Main page
+    # TCL unauthenticated API methods
+    tcl_methods = [
+        "GetCurrentLanguage",
+        "GetLoginState",
+        "GetSimStatus",
+        "GetNetworkInfo",
+        "GetConnectionState",
+        "GetDeviceNewVersion",
+        "GetWPSStatus",
+        "GetNetworkRegisterState",
+    ]
+
+    for method in tcl_methods:
+        try:
+            body = f'{{"jsonrpc":"2.0","method":"{method}","params":{{}},"id":"1"}}'
+            resp = await _raw_http_request(host, port, "POST", "/jrd/webapi", body=body)
+            results[f"tcl_{method}"] = resp[:2000]
+        except Exception as e:
+            results[f"tcl_{method}"] = f"ERROR: {e}"
+
+    # Follow redirect - get login page
     try:
         resp = await _raw_http_request(host, port, "GET", "/")
-        results["main_page"] = resp[:3000]
+        # Extract redirect location
+        import re
+        loc = re.search(r'Location:\s*(\S+)', resp)
+        if loc:
+            redirect_path = loc.group(1)
+            results["redirect_to"] = redirect_path
+            # Follow redirect
+            if redirect_path.startswith("/"):
+                resp2 = await _raw_http_request(host, port, "GET", redirect_path)
+                results["login_page"] = resp2[:3000]
+        else:
+            results["main_page"] = resp[:3000]
     except Exception as e:
-        results["main_page"] = f"ERROR: {e}"
-
-    # 2. TCL API - GetSystemInfo (POST)
-    try:
-        body = '{"jsonrpc":"2.0","method":"GetSystemInfo","params":{},"id":"1"}'
-        resp = await _raw_http_request(host, port, "POST", "/jrd/webapi", body=body)
-        results["tcl_GetSystemInfo"] = resp[:2000]
-    except Exception as e:
-        results["tcl_GetSystemInfo"] = f"ERROR: {e}"
-
-    # 3. TCL API - GetDeviceInfo (POST)
-    try:
-        body = '{"jsonrpc":"2.0","method":"GetDeviceInfo","params":{},"id":"1"}'
-        resp = await _raw_http_request(host, port, "POST", "/jrd/webapi", body=body)
-        results["tcl_GetDeviceInfo"] = resp[:2000]
-    except Exception as e:
-        results["tcl_GetDeviceInfo"] = f"ERROR: {e}"
-
-    # 4. Huawei API
-    try:
-        resp = await _raw_http_request(host, port, "GET", "/api/device/basic_information")
-        results["huawei_info"] = resp[:2000]
-    except Exception as e:
-        results["huawei_info"] = f"ERROR: {e}"
-
-    # 5. Generic device info
-    try:
-        resp = await _raw_http_request(host, port, "GET", "/api/device/information")
-        results["generic_info"] = resp[:2000]
-    except Exception as e:
-        results["generic_info"] = f"ERROR: {e}"
+        results["main_page_error"] = f"ERROR: {e}"
 
     return results
 
