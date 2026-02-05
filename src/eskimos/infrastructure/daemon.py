@@ -318,10 +318,11 @@ async def execute_command(client_key: str, command: dict) -> None:
                 # Restart Gateway service first (picks up new Python code)
                 try:
                     import subprocess
-                    subprocess.run(
-                        ["nssm", "restart", "EskimosGateway"],
-                        timeout=30, capture_output=True
-                    )
+                    subprocess.run(["net", "stop", "EskimosGateway"],
+                                   timeout=30, capture_output=True)
+                    await asyncio.sleep(2)
+                    subprocess.run(["net", "start", "EskimosGateway"],
+                                   timeout=30, capture_output=True)
                     log("Gateway service restarted")
                 except Exception as e:
                     log(f"Gateway restart skipped: {e}")
@@ -337,17 +338,23 @@ async def execute_command(client_key: str, command: dict) -> None:
             graceful_shutdown()
 
         elif cmd_type == "restart_gateway":
-            # Restart EskimosGateway NSSM service (picks up new code)
+            # Restart EskimosGateway Windows service (picks up new code)
             import subprocess
+            svc_name = payload.get("service_name", "EskimosGateway")
             try:
                 subprocess.run(
-                    ["nssm", "restart", "EskimosGateway"],
+                    ["net", "stop", svc_name],
                     timeout=30, capture_output=True
                 )
-                log("Gateway service restarted")
+                await asyncio.sleep(2)
+                subprocess.run(
+                    ["net", "start", svc_name],
+                    timeout=30, capture_output=True
+                )
+                log(f"Service {svc_name} restarted")
                 await acknowledge_command(client_key, cmd_id, True)
             except Exception as e:
-                log(f"Gateway restart failed: {e}")
+                log(f"Service restart failed: {e}")
                 await acknowledge_command(client_key, cmd_id, False, str(e))
 
         elif cmd_type == "config":
