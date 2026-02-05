@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import sys
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -24,8 +24,8 @@ MODEM_PHONE = os.environ.get("MODEM_PHONE_NUMBER", "886480453")
 MODEM_TYPE = os.environ.get("MODEM_TYPE", "puppeteer")
 MODEM_PROBE_TIMEOUT = float(os.environ.get("MODEM_PROBE_TIMEOUT", "3.0"))
 
-# Cache for hardware detection (doesn't change between heartbeats)
-_modem_hw_cache: dict | None = None
+# Cache for hardware detection
+_modem_hw_cache: Optional[dict] = None
 
 
 class ModemHealthInfo(BaseModel):
@@ -54,8 +54,8 @@ class HealthResponse(BaseModel):
 def detect_modem_hardware() -> dict:
     """Detect USB modem model and manufacturer from Windows PnP devices.
 
-    Scans network adapters for RNDIS/NDIS/Mobile devices (USB modems).
-    Result is cached since hardware doesn't change between heartbeats.
+    Uses wmic to scan network adapters for RNDIS/modem devices.
+    Wrapped in try/except at every level - safe for Windows Service context.
     """
     global _modem_hw_cache
     if _modem_hw_cache is not None:
@@ -68,44 +68,50 @@ def detect_modem_hardware() -> dict:
         return result
 
     try:
+        import subprocess
+
         # Query network adapters for RNDIS/modem devices
         proc = subprocess.run(
             ["wmic", "nic", "get", "Name,Manufacturer,PNPDeviceID", "/format:csv"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
         )
-        for line in proc.stdout.strip().split("\n"):
-            line_lower = line.lower()
-            if any(kw in line_lower for kw in ["ndis", "rndis", "mobile", "lte", "4g", "gsm"]):
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 4:
-                    result["manufacturer"] = parts[1] or ""
-                    result["connection_type"] = "RNDIS/USB"
-                    # Extract model from adapter name
-                    adapter_name = parts[2]
-                    if adapter_name:
-                        result["model"] = adapter_name
-                    break
-
-        # If found RNDIS adapter, try to get USB device details for exact model
-        if result["manufacturer"] or result["model"]:
-            proc2 = subprocess.run(
-                ["wmic", "path", "Win32_PnPEntity", "where",
-                 "Name like '%NDIS%' or Name like '%RNDIS%' or Name like '%Mobile%' or Name like '%LTE%'",
-                 "get", "Name,Manufacturer,Description", "/format:csv"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            for line in proc2.stdout.strip().split("\n"):
+        if proc.returncode == 0:
+            for line in proc.stdout.strip().split("\n"):
                 line_lower = line.lower()
-                if any(kw in line_lower for kw in ["ndis", "rndis", "mobile", "lte"]):
+                if any(kw in line_lower for kw in ["ndis", "rndis", "mobile", "lte", "4g", "gsm"]):
                     parts = [p.strip() for p in line.split(",")]
                     if len(parts) >= 4:
-                        if parts[2]:  # Manufacturer from PnP
-                            result["manufacturer"] = parts[2]
-                        if parts[3]:  # Name from PnP
-                            result["model"] = parts[3]
-                    break
+                        result["manufacturer"] = parts[1] or ""
+                        result["connection_type"] = "RNDIS/USB"
+                        adapter_name = parts[2]
+                        if adapter_name:
+                            result["model"] = adapter_name
+                        break
+
+        # Try to get more detailed USB device info
+        if result["manufacturer"] or result["model"]:
+            try:
+                proc2 = subprocess.run(
+                    ["wmic", "path", "Win32_PnPEntity", "where",
+                     "Name like '%NDIS%' or Name like '%RNDIS%' or Name like '%Mobile%' or Name like '%LTE%'",
+                     "get", "Name,Manufacturer,Description", "/format:csv"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=0x08000000,
+                )
+                if proc2.returncode == 0:
+                    for line in proc2.stdout.strip().split("\n"):
+                        line_lower = line.lower()
+                        if any(kw in line_lower for kw in ["ndis", "rndis", "mobile", "lte"]):
+                            parts = [p.strip() for p in line.split(",")]
+                            if len(parts) >= 4:
+                                if parts[2]:
+                                    result["manufacturer"] = parts[2]
+                                if parts[3]:
+                                    result["model"] = parts[3]
+                            break
+            except Exception:
+                pass  # PnP query is optional
 
     except Exception as e:
         logger.warning(f"Modem hardware detection failed: {e}")
@@ -114,19 +120,14 @@ def detect_modem_hardware() -> dict:
     return result
 
 
-def clear_modem_cache():
+def clear_modem_cache() -> None:
     """Clear hardware cache (call when modem might have changed)."""
     global _modem_hw_cache
     _modem_hw_cache = None
 
 
 async def probe_modem(host: str, port: int, timeout: float) -> bool:
-    """Check if modem is reachable via TCP connection.
-
-    When RNDIS modem is plugged into USB, its network adapter exists
-    and the modem's web panel is reachable at its IP.
-    When unplugged, the adapter disappears and connection fails.
-    """
+    """Check if modem is reachable via TCP connection."""
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout
@@ -140,15 +141,14 @@ async def probe_modem(host: str, port: int, timeout: float) -> bool:
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
-    """Check API health, modem connectivity and hardware info.
-
-    Probes the modem's IP address and detects hardware model via WMI.
-    """
+    """Check API health, modem connectivity and hardware info."""
     modem_reachable = await probe_modem(MODEM_HOST, MODEM_PORT, MODEM_PROBE_TIMEOUT)
 
-    hw = detect_modem_hardware()
+    try:
+        hw = detect_modem_hardware()
+    except Exception:
+        hw = {"model": "", "manufacturer": "", "connection_type": ""}
 
-    # Clear cache if modem state changed (for hot-plug detection)
     if not modem_reachable:
         clear_modem_cache()
 
