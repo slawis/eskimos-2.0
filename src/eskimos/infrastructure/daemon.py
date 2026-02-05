@@ -300,12 +300,14 @@ async def execute_command(client_key: str, command: dict) -> None:
     try:
         if cmd_type == "update":
             from eskimos.infrastructure.updater import perform_update
-            await perform_update(payload.get("version"))
-            await acknowledge_command(client_key, cmd_id, True)
-            # Schedule restart
-            log("Update complete, restarting...")
-            await asyncio.sleep(2)
-            graceful_shutdown()
+            success = await perform_update(payload.get("version"))
+            await acknowledge_command(client_key, cmd_id, success, None if success else "Update failed")
+            if success:
+                log("Update complete, restarting...")
+                await asyncio.sleep(2)
+                graceful_shutdown()
+            else:
+                log("Update failed, continuing with current version")
 
         elif cmd_type == "restart":
             await acknowledge_command(client_key, cmd_id, True)

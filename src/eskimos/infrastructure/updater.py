@@ -41,7 +41,7 @@ except ImportError:
 
 # ==================== Configuration ====================
 
-PORTABLE_ROOT = Path(__file__).parent.parent.parent.parent  # EskimosGateway/
+PORTABLE_ROOT = Path(__file__).parent.parent.parent  # EskimosGateway/
 ESKIMOS_DIR = PORTABLE_ROOT / "eskimos"
 BACKUP_DIR = PORTABLE_ROOT / "_backups"
 UPDATE_DIR = PORTABLE_ROOT / "_updates"
