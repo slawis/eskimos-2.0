@@ -5,5 +5,5 @@ Professional Python implementation for automated SMS marketing
 with AI-powered personalization and multi-modem support.
 """
 
-__version__ = "2.3.2"
+__version__ = "2.3.3"
 __author__ = "NinjaBot Team"

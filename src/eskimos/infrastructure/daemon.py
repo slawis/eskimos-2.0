@@ -375,23 +375,84 @@ def apply_config(new_config: dict) -> None:
         log(f"Config apply error: {e}")
 
 
+async def _raw_http_request(host: str, port: int, method: str, path: str,
+                            body: str = "", timeout: float = 5.0) -> str:
+    """Send raw HTTP request and return full response."""
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(host, port), timeout=timeout
+    )
+    headers = f"{method} {path} HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\n"
+    if body:
+        headers += f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+    headers += "\r\n"
+    writer.write(headers.encode() + body.encode())
+    await writer.drain()
+    data = await asyncio.wait_for(reader.read(8192), timeout=timeout)
+    writer.close()
+    await writer.wait_closed()
+    return data.decode("utf-8", errors="ignore")
+
+
+async def probe_modem_debug() -> dict:
+    """Directly probe modem HTTP endpoints for debug data."""
+    results = {}
+    host = MODEM_HOST
+    port = MODEM_PORT
+
+    # 1. Main page
+    try:
+        resp = await _raw_http_request(host, port, "GET", "/")
+        results["main_page"] = resp[:3000]
+    except Exception as e:
+        results["main_page"] = f"ERROR: {e}"
+
+    # 2. TCL API - GetSystemInfo (POST)
+    try:
+        body = '{"jsonrpc":"2.0","method":"GetSystemInfo","params":{},"id":"1"}'
+        resp = await _raw_http_request(host, port, "POST", "/jrd/webapi", body=body)
+        results["tcl_GetSystemInfo"] = resp[:2000]
+    except Exception as e:
+        results["tcl_GetSystemInfo"] = f"ERROR: {e}"
+
+    # 3. TCL API - GetDeviceInfo (POST)
+    try:
+        body = '{"jsonrpc":"2.0","method":"GetDeviceInfo","params":{},"id":"1"}'
+        resp = await _raw_http_request(host, port, "POST", "/jrd/webapi", body=body)
+        results["tcl_GetDeviceInfo"] = resp[:2000]
+    except Exception as e:
+        results["tcl_GetDeviceInfo"] = f"ERROR: {e}"
+
+    # 4. Huawei API
+    try:
+        resp = await _raw_http_request(host, port, "GET", "/api/device/basic_information")
+        results["huawei_info"] = resp[:2000]
+    except Exception as e:
+        results["huawei_info"] = f"ERROR: {e}"
+
+    # 5. Generic device info
+    try:
+        resp = await _raw_http_request(host, port, "GET", "/api/device/information")
+        results["generic_info"] = resp[:2000]
+    except Exception as e:
+        results["generic_info"] = f"ERROR: {e}"
+
+    return results
+
+
 async def run_diagnostic() -> dict:
-    """Run diagnostic checks including modem debug data."""
+    """Run diagnostic checks including direct modem HTTP probing."""
     modem = await get_modem_status()
     metrics = await get_sms_metrics()
     system = get_system_info()
 
-    # Try to get modem debug data from local Gateway API
+    # Direct HTTP probe to modem (bypasses Gateway API)
     modem_debug = {}
     try:
-        if HAS_HTTPX:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    "http://localhost:8000/api/modem/debug",
-                    timeout=15.0
-                )
-                if response.status_code == 200:
-                    modem_debug = response.json()
+        reachable = await probe_modem_direct()
+        if reachable:
+            modem_debug = await probe_modem_debug()
+        else:
+            modem_debug = {"error": "Modem not reachable via TCP"}
     except Exception as e:
         modem_debug = {"error": str(e)}
 
