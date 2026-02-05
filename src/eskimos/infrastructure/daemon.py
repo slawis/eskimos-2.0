@@ -146,37 +146,101 @@ async def probe_modem_direct() -> bool:
         return False
 
 
-async def get_modem_status() -> dict:
-    """Get modem status - first from local API, fallback to direct probe."""
-    # Try local Gateway API first
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "http://localhost:8000/api/health",
-                timeout=5.0
-            )
-            if response.status_code == 200:
-                data = response.json()
-                modem = data.get("modem", {})
-                is_connected = modem.get("connected", data.get("modem_connected", False))
-                return {
-                    "status": "connected" if is_connected else "disconnected",
-                    "phone_number": modem.get("phone_number", MODEM_PHONE) if is_connected else "",
-                    "model": modem.get("model", ""),
-                    "manufacturer": modem.get("manufacturer", ""),
-                    "connection_type": modem.get("connection_type", ""),
-                }
-    except Exception:
-        pass
+_modem_model_cache = None
 
-    # Fallback: direct TCP probe to modem IP
+
+async def detect_modem_model_tcl() -> dict:
+    """Detect TCL/Alcatel modem model via JRD webapi login."""
+    global _modem_model_cache
+    if _modem_model_cache:
+        return _modem_model_cache
+
+    if not HAS_HTTPX:
+        return {}
+
+    import re
+    result = {"model": "", "manufacturer": "", "connection_type": "RNDIS/USB"}
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            # Get main page and extract TCL verification token
+            resp = await client.get(base_url)
+            m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+            if not m:
+                return result
+
+            token = m.group(1)
+            headers = {
+                "_TclRequestVerificationKey": token,
+                "Referer": f"http://{MODEM_HOST}/index.html",
+            }
+            result["manufacturer"] = "Alcatel/TCL"
+
+            # Login
+            login_body = {
+                "jsonrpc": "2.0", "method": "Login",
+                "params": {"UserName": "admin", "Password": "admin"}, "id": "1"
+            }
+            resp = await client.post(f"{base_url}/jrd/webapi",
+                                     json=login_body, headers=headers)
+            if "result" not in resp.text or "error" in resp.text.lower():
+                return result
+
+            # GetSystemInfo
+            body = {"jsonrpc": "2.0", "method": "GetSystemInfo",
+                    "params": {}, "id": "1"}
+            resp = await client.post(f"{base_url}/jrd/webapi",
+                                     json=body, headers=headers)
+            m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', resp.text)
+            if m:
+                result["model"] = m.group(1).strip()
+                hw = re.search(r'"HwVersion"\s*:\s*"([^"]+)"', resp.text)
+                if hw:
+                    result["model"] = f"{result['model']} ({hw.group(1).strip()})"
+
+            # Logout
+            try:
+                await client.post(f"{base_url}/jrd/webapi",
+                                  json={"jsonrpc": "2.0", "method": "Logout",
+                                        "params": {}, "id": "1"},
+                                  headers=headers)
+            except Exception:
+                pass
+
+            if result["model"]:
+                _modem_model_cache = result
+
+    except Exception as e:
+        log(f"TCL detection error: {e}")
+
+    return result
+
+
+async def get_modem_status() -> dict:
+    """Get modem status via direct TCP probe + TCL model detection."""
     reachable = await probe_modem_direct()
+
+    if not reachable:
+        global _modem_model_cache
+        _modem_model_cache = None
+        return {
+            "status": "disconnected",
+            "phone_number": "",
+            "model": "",
+            "manufacturer": "",
+            "connection_type": "",
+        }
+
+    # Direct model detection (cached)
+    hw = await detect_modem_model_tcl()
+
     return {
-        "status": "connected" if reachable else "disconnected",
-        "phone_number": MODEM_PHONE if reachable else "",
-        "model": "",
-        "manufacturer": "",
-        "connection_type": "",
+        "status": "connected",
+        "phone_number": MODEM_PHONE,
+        "model": hw.get("model", ""),
+        "manufacturer": hw.get("manufacturer", ""),
+        "connection_type": hw.get("connection_type", "RNDIS/USB"),
     }
 
 
