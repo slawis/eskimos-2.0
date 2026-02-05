@@ -127,80 +127,106 @@ async def detect_modem_via_http(host: str, port: int, timeout: float) -> dict:
     return result
 
 
+async def _http_request(host: str, port: int, method: str, path: str,
+                        body: str = "", timeout: float = 3.0,
+                        content_type: str = "application/json") -> str:
+    """Send raw HTTP request and return response body."""
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(host, port), timeout=timeout
+    )
+
+    headers = f"{method} {path} HTTP/1.0\r\nHost: {host}\r\nAccept: */*\r\n"
+    if body:
+        headers += f"Content-Type: {content_type}\r\nContent-Length: {len(body)}\r\n"
+    headers += "\r\n"
+
+    writer.write(headers.encode() + body.encode())
+    await writer.drain()
+
+    data = await asyncio.wait_for(reader.read(8192), timeout=timeout)
+    writer.close()
+    await writer.wait_closed()
+
+    return data.decode("utf-8", errors="ignore")
+
+
 async def _try_modem_apis(host: str, port: int, timeout: float, result: dict) -> dict:
     """Try known REST API endpoints for common modem brands."""
-    api_endpoints = [
-        # TCL / Alcatel
-        ("/jrd/webapi?api=GetSystemInfo", "tcl"),
-        ("/api/device/information", "generic"),
-        # Huawei HiLink
-        ("/api/device/basic_information", "huawei"),
-        # ZTE
-        ("/goform/goform_get_cmd_process?cmd=manufacturer_name,model_name", "zte"),
+
+    # TCL / Alcatel - uses POST with JSON-RPC
+    tcl_methods = [
+        ("GetSystemInfo", ["DeviceName", "Manufacturer", "FwVersion"]),
+        ("GetDeviceInfo", ["DeviceName", "Manufacturer"]),
+        ("GetCurrentLanguage", []),  # fallback to confirm it's TCL
     ]
 
-    for path, brand in api_endpoints:
+    for method_name, _ in tcl_methods:
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=timeout
-            )
-            request = f"GET {path} HTTP/1.0\r\nHost: {host}\r\nAccept: application/json\r\n\r\n"
-            writer.write(request.encode())
-            await writer.drain()
-
-            data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
-            writer.close()
-            await writer.wait_closed()
-
-            body = data.decode("utf-8", errors="ignore")
-
-            # Skip if 404 or error
-            if "404" in body[:30] or "error" in body[:50].lower():
+            json_body = f'{{"jsonrpc":"2.0","method":"{method_name}","params":{{}},"id":"1"}}'
+            resp = await _http_request(host, port, "POST", "/jrd/webapi",
+                                       body=json_body, timeout=timeout)
+            if "404" in resp[:30] or "error" in resp[:100].lower():
                 continue
 
-            # Parse JSON-like responses
-            if brand == "tcl":
-                m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', body)
+            # Parse TCL response
+            m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', resp)
+            if m:
+                result["model"] = m.group(1)
+            m = re.search(r'"Manufacturer"\s*:\s*"([^"]+)"', resp)
+            if m:
+                result["manufacturer"] = m.group(1)
+            if not result["model"]:
+                m = re.search(r'"[Ff]w[Vv]ersion"\s*:\s*"([^"]+)"', resp)
                 if m:
-                    result["model"] = m.group(1)
-                m = re.search(r'"Manufacturer"\s*:\s*"([^"]+)"', body)
-                if m:
-                    result["manufacturer"] = m.group(1)
-                if result["model"]:
-                    break
-
-            elif brand == "huawei":
-                m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', body)
-                if not m:
-                    m = re.search(r'"devicename"\s*:\s*"([^"]+)"', body, re.IGNORECASE)
-                if m:
-                    result["model"] = m.group(1)
-                    result["manufacturer"] = "Huawei"
-                    break
-
-            elif brand == "zte":
-                m = re.search(r'"model_name"\s*:\s*"([^"]+)"', body)
-                if m:
-                    result["model"] = m.group(1)
-                m = re.search(r'"manufacturer_name"\s*:\s*"([^"]+)"', body)
-                if m:
-                    result["manufacturer"] = m.group(1)
-                if result["model"]:
-                    break
-
-            else:
-                # Generic: try to find model/manufacturer in any JSON
-                m = re.search(r'"[Mm]odel[^"]*"\s*:\s*"([^"]+)"', body)
-                if m:
-                    result["model"] = m.group(1)
-                m = re.search(r'"[Mm]anufacturer[^"]*"\s*:\s*"([^"]+)"', body)
-                if m:
-                    result["manufacturer"] = m.group(1)
-                if result["model"]:
-                    break
-
+                    result["model"] = f"TCL ({m.group(1)})"
+                    result["manufacturer"] = "TCL"
+            if result["model"]:
+                return result
         except Exception:
             continue
+
+    # Huawei HiLink - GET
+    try:
+        resp = await _http_request(host, port, "GET",
+                                   "/api/device/basic_information", timeout=timeout)
+        m = re.search(r'"DeviceName"\s*:\s*"([^"]+)"', resp, re.IGNORECASE)
+        if m:
+            result["model"] = m.group(1)
+            result["manufacturer"] = "Huawei"
+            return result
+    except Exception:
+        pass
+
+    # ZTE - GET
+    try:
+        resp = await _http_request(host, port, "GET",
+                                   "/goform/goform_get_cmd_process?cmd=manufacturer_name,model_name",
+                                   timeout=timeout)
+        m = re.search(r'"model_name"\s*:\s*"([^"]+)"', resp)
+        if m:
+            result["model"] = m.group(1)
+        m = re.search(r'"manufacturer_name"\s*:\s*"([^"]+)"', resp)
+        if m:
+            result["manufacturer"] = m.group(1)
+        if result["model"]:
+            return result
+    except Exception:
+        pass
+
+    # Generic - GET /api/device/information
+    try:
+        resp = await _http_request(host, port, "GET",
+                                   "/api/device/information", timeout=timeout)
+        m = re.search(r'"[Mm]odel[^"]*"\s*:\s*"([^"]+)"', resp)
+        if m:
+            result["model"] = m.group(1)
+        m = re.search(r'"[Mm]anufacturer[^"]*"\s*:\s*"([^"]+)"', resp)
+        if m:
+            result["manufacturer"] = m.group(1)
+        if result["model"]:
+            return result
+    except Exception:
+        pass
 
     return result
 
@@ -268,3 +294,45 @@ async def health_check() -> HealthResponse:
 async def ping() -> dict:
     """Simple ping endpoint."""
     return {"pong": True}
+
+
+@router.get("/modem/debug")
+async def modem_debug() -> dict:
+    """Debug endpoint: show raw modem HTTP responses."""
+    results = {}
+
+    # 1. Main page
+    try:
+        resp = await _http_request(MODEM_HOST, MODEM_PORT, "GET", "/",
+                                   timeout=MODEM_PROBE_TIMEOUT)
+        results["main_page"] = resp[:2000]
+    except Exception as e:
+        results["main_page"] = f"ERROR: {e}"
+
+    # 2. TCL API - GetSystemInfo
+    try:
+        json_body = '{"jsonrpc":"2.0","method":"GetSystemInfo","params":{},"id":"1"}'
+        resp = await _http_request(MODEM_HOST, MODEM_PORT, "POST", "/jrd/webapi",
+                                   body=json_body, timeout=MODEM_PROBE_TIMEOUT)
+        results["tcl_system_info"] = resp[:2000]
+    except Exception as e:
+        results["tcl_system_info"] = f"ERROR: {e}"
+
+    # 3. TCL API - GetDeviceInfo
+    try:
+        json_body = '{"jsonrpc":"2.0","method":"GetDeviceInfo","params":{},"id":"1"}'
+        resp = await _http_request(MODEM_HOST, MODEM_PORT, "POST", "/jrd/webapi",
+                                   body=json_body, timeout=MODEM_PROBE_TIMEOUT)
+        results["tcl_device_info"] = resp[:2000]
+    except Exception as e:
+        results["tcl_device_info"] = f"ERROR: {e}"
+
+    # 4. Detection result
+    try:
+        clear_modem_cache()
+        hw = await detect_modem_via_http(MODEM_HOST, MODEM_PORT, MODEM_PROBE_TIMEOUT)
+        results["detected"] = hw
+    except Exception as e:
+        results["detected"] = f"ERROR: {e}"
+
+    return results
