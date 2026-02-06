@@ -809,9 +809,12 @@ async def _modem_receive_sms_direct() -> list:
                                             "id": "2"},
                                       headers=headers)
             contacts_data = resp.json()
-            contact_list = contacts_data.get("result", {}).get("SMSContactList", [])
+            log(f"Incoming SMS: GetSMSContactList raw: {contacts_data}")
+            result = contacts_data.get("result") or {}
+            contact_list = result.get("SMSContactList") or []
 
             if not contact_list:
+                log("Incoming SMS: no contacts/conversations on modem")
                 return []
 
             # 4. For each contact, get messages
@@ -829,7 +832,8 @@ async def _modem_receive_sms_direct() -> list:
                                           headers=headers)
                 req_id += 1
                 content_data = resp.json()
-                sms_list = content_data.get("result", {}).get("SMSContentList", [])
+                log(f"Incoming SMS: GetSMSContentList for {phone_number}: {content_data}")
+                sms_list = (content_data.get("result") or {}).get("SMSContentList") or []
 
                 for sms in sms_list:
                     # SMSType=1 means incoming (received), SMSType=0 means sent by us
@@ -874,7 +878,9 @@ async def poll_incoming_sms() -> int:
         return 0
 
     try:
+        log("Incoming SMS: polling modem...")
         messages = await _modem_receive_sms_direct()
+        log(f"Incoming SMS: got {len(messages)} messages")
         if not messages:
             return 0
 
@@ -901,6 +907,8 @@ async def poll_incoming_sms() -> int:
 
     except Exception as e:
         log(f"Incoming SMS poll error: {e}")
+        import traceback
+        traceback.print_exc()
         return 0
 
 
