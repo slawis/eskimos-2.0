@@ -882,9 +882,9 @@ async def _modem_receive_sms_direct() -> list:
                 for sms in sms_list:
                     sms_type = sms.get("SMSType", 0)
                     sms_id = sms.get("SMSId")
-                    # TCL/Alcatel IK41: SMSType=0 means sent by us, SMSType=2 means received
+                    # TCL/Alcatel IK41: SMSType=0 means INCOMING (received), SMSType=2 means OUTGOING (sent)
                     # Skip already processed messages (DeleteSMS doesn't work on IK41 firmware)
-                    if sms_type != 0 and sms_id not in _processed_sms_ids:
+                    if sms_type == 0 and sms_id not in _processed_sms_ids:
                         messages.append({
                             "sender": phone_number,
                             "content": sms.get("SMSContent", ""),
