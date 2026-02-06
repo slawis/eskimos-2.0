@@ -631,41 +631,10 @@ async def run_diagnostic() -> dict:
                                                 "id": "2"}, headers=hdrs)
                     contacts = resp.json()
                     incoming_test["contacts_raw"] = str(contacts)
-                    # Also get content list for first contact + test delete
+                    # Get SMS count info
                     clist = (contacts.get("result") or {}).get("SMSContactList") or []
-                    if clist:
-                        cid = clist[0].get("ContactId")
-                        if cid:
-                            resp = await hc.post(f"{base_url}/jrd/webapi",
-                                                  json={"jsonrpc": "2.0", "method": "GetSMSContentList",
-                                                        "params": {"ContactId": cid, "Page": 0},
-                                                        "id": "3"}, headers=hdrs)
-                            content = resp.json()
-                            incoming_test["content_raw"] = str(content)
-                            # Try different delete methods
-                            sms_items = (content.get("result") or {}).get("SMSContentList") or []
-                            if sms_items:
-                                first_sms_id = sms_items[0].get("SMSId")
-                                # Method 1: DeleteSMS by SMSId
-                                r1 = await hc.post(f"{base_url}/jrd/webapi",
-                                    json={"jsonrpc": "2.0", "method": "DeleteSMS",
-                                          "params": {"SMSId": first_sms_id}, "id": "d1"}, headers=hdrs)
-                                incoming_test["delete_by_smsid"] = str(r1.json())
-                                # Method 2: DeleteSMS by ContactId
-                                r2 = await hc.post(f"{base_url}/jrd/webapi",
-                                    json={"jsonrpc": "2.0", "method": "DeleteSMS",
-                                          "params": {"ContactId": cid}, "id": "d2"}, headers=hdrs)
-                                incoming_test["delete_by_contactid"] = str(r2.json())
-                                # Method 3: DeleteSMS with Flag
-                                r3 = await hc.post(f"{base_url}/jrd/webapi",
-                                    json={"jsonrpc": "2.0", "method": "DeleteSMS",
-                                          "params": {"SMSId": first_sms_id, "Flag": 0}, "id": "d3"}, headers=hdrs)
-                                incoming_test["delete_with_flag"] = str(r3.json())
-                                # Re-check contacts after delete attempts
-                                resp = await hc.post(f"{base_url}/jrd/webapi",
-                                    json={"jsonrpc": "2.0", "method": "GetSMSContactList",
-                                          "params": {"Page": 0, "ContactNum": 100}, "id": "d4"}, headers=hdrs)
-                                incoming_test["contacts_after_delete"] = str(resp.json())
+                    incoming_test["conversations"] = len(clist)
+                    incoming_test["processed_ids"] = len(_processed_sms_ids)
                     # Logout
                     try:
                         await hc.post(f"{base_url}/jrd/webapi",
@@ -883,12 +852,10 @@ async def _modem_receive_sms_direct() -> list:
                                             "id": "2"},
                                       headers=headers)
             contacts_data = resp.json()
-            log(f"Incoming SMS: GetSMSContactList raw: {contacts_data}")
             result = contacts_data.get("result") or {}
             contact_list = result.get("SMSContactList") or []
 
             if not contact_list:
-                log("Incoming SMS: no contacts/conversations on modem")
                 return []
 
             # 4. For each contact, get messages
@@ -901,7 +868,6 @@ async def _modem_receive_sms_direct() -> list:
                     phone_number = phone_raw[0] if phone_raw else ""
                 else:
                     phone_number = str(phone_raw)
-                log(f"Incoming SMS: contact {contact_id}, phone={phone_number}, unread={contact.get('UnreadCount')}")
                 if not contact_id:
                     continue
 
@@ -911,34 +877,19 @@ async def _modem_receive_sms_direct() -> list:
                                                 "id": str(req_id)},
                                           headers=headers)
                 req_id += 1
-                content_data = resp.json()
-                log(f"Incoming SMS: GetSMSContentList for {phone_number}: {content_data}")
-                sms_list = (content_data.get("result") or {}).get("SMSContentList") or []
+                sms_list = (resp.json().get("result") or {}).get("SMSContentList") or []
 
                 for sms in sms_list:
                     sms_type = sms.get("SMSType", 0)
                     sms_id = sms.get("SMSId")
-                    log(f"Incoming SMS: msg SMSId={sms_id}, type={sms_type}, content={sms.get('SMSContent', '')[:50]}")
                     # TCL/Alcatel IK41: SMSType=0 means sent by us, SMSType=2 means received
-                    # Skip already processed messages (in case DeleteSMS doesn't work)
+                    # Skip already processed messages (DeleteSMS doesn't work on IK41 firmware)
                     if sms_type != 0 and sms_id not in _processed_sms_ids:
                         messages.append({
                             "sender": phone_number,
                             "content": sms.get("SMSContent", ""),
                         })
                         _processed_sms_ids.add(sms_id)
-
-                # 5. Delete entire conversation from modem (individual DeleteSMS doesn't work on IK41)
-                try:
-                    resp = await client.post(f"{base_url}/jrd/webapi",
-                                              json={"jsonrpc": "2.0", "method": "DeleteSMS",
-                                                    "params": {"ContactId": contact_id},
-                                                    "id": str(req_id)},
-                                              headers=headers)
-                    req_id += 1
-                    log(f"Incoming SMS: DeleteSMS ContactId={contact_id}: {resp.json()}")
-                except Exception as e:
-                    log(f"Incoming SMS: delete error: {e}")
 
         finally:
             # 6. Logout
@@ -962,9 +913,7 @@ async def poll_incoming_sms() -> int:
         return 0
 
     try:
-        log("Incoming SMS: polling modem...")
         messages = await _modem_receive_sms_direct()
-        log(f"Incoming SMS: got {len(messages)} messages")
         if not messages:
             return 0
 
