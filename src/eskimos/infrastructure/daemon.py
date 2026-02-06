@@ -83,6 +83,12 @@ _sms_hourly_count = 0
 _sms_hourly_reset_time = 0
 _sms_rate_limited = False
 
+# SMS storage monitoring
+SMS_STORAGE_CHECK_INTERVAL = 6 * 3600  # 6 hours
+SMS_STORAGE_WARN_PERCENT = 80  # Alert when storage > 80% full
+_sms_storage_used = 0
+_sms_storage_max = 100
+
 
 # ==================== Logging ====================
 
@@ -353,6 +359,8 @@ async def get_sms_metrics() -> dict:
         "daily_limit": SMS_DAILY_LIMIT,
         "hourly_limit": SMS_HOURLY_LIMIT,
         "hourly_count": _sms_hourly_count,
+        "storage_used": _sms_storage_used,
+        "storage_max": _sms_storage_max,
     }
 
 
@@ -1284,6 +1292,53 @@ async def poll_incoming_sms() -> int:
         return 0
 
 
+# ==================== SMS Storage Monitoring ====================
+
+async def check_sms_storage() -> None:
+    """Check modem SMS storage and log warning if getting full."""
+    global _sms_storage_used, _sms_storage_max
+    import re
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+
+    if not HAS_HTTPX:
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(base_url)
+            m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+            if not m:
+                return
+
+            token = m.group(1)
+            headers = {
+                "_TclRequestVerificationKey": token,
+                "Referer": f"http://{MODEM_HOST}/index.html",
+            }
+
+            resp = await client.post(f"{base_url}/jrd/webapi",
+                json={"jsonrpc": "2.0", "method": "GetSMSStorageState",
+                      "params": {}, "id": "1"}, headers=headers)
+
+            result = (resp.json().get("result") or {})
+            _sms_storage_max = result.get("MaxCount", 100)
+            _sms_storage_used = result.get("TUseCount", 0)
+            left = result.get("LeftCount", _sms_storage_max - _sms_storage_used)
+
+            percent = (_sms_storage_used / _sms_storage_max * 100) if _sms_storage_max > 0 else 0
+            log(f"SMS storage: {_sms_storage_used}/{_sms_storage_max} ({percent:.0f}%), {left} free")
+
+            if percent >= SMS_STORAGE_WARN_PERCENT:
+                log(f"WARNING: SMS storage {percent:.0f}% full! "
+                    f"Only {left} slots remaining. "
+                    f"Consider manual cleanup or firmware update.")
+                global _last_sms_error
+                _last_sms_error = f"SMS storage {percent:.0f}% full ({_sms_storage_used}/{_sms_storage_max})"
+
+    except Exception as e:
+        log(f"SMS storage check error: {e}")
+
+
 # ==================== Shutdown ====================
 
 _shutdown_requested = False
@@ -1328,6 +1383,7 @@ async def daemon_loop():
     last_update_check = 0
     last_sms_poll = 0
     last_incoming_poll = 0
+    last_storage_check = 0
 
     log(f"SMS polling: {SMS_POLL_INTERVAL}s, Incoming SMS: {INCOMING_SMS_INTERVAL}s")
     log(f"Rate limits: {SMS_DAILY_LIMIT}/day, {SMS_HOURLY_LIMIT}/hour")
@@ -1370,6 +1426,14 @@ async def daemon_loop():
                 except Exception as e:
                     log(f"Incoming SMS loop error: {e}")
                 last_incoming_poll = now
+
+            # SMS storage monitoring
+            if now - last_storage_check >= SMS_STORAGE_CHECK_INTERVAL:
+                try:
+                    await check_sms_storage()
+                except Exception as e:
+                    log(f"SMS storage check error: {e}")
+                last_storage_check = now
 
             # Periodic update check (background)
             if AUTO_UPDATE_ENABLED and now - last_update_check >= UPDATE_CHECK_INTERVAL:
