@@ -525,6 +525,18 @@ async def execute_command(client_key: str, command: dict) -> None:
             await acknowledge_command(client_key, cmd_id, True, result=diag)
             log(f"Diagnostic complete")
 
+        elif cmd_type == "sms_discover":
+            # Discover all API methods from modem's web panel JS
+            result = await discover_modem_api_methods()
+            await acknowledge_command(client_key, cmd_id, True, result=result)
+            log(f"SMS discover complete: {len(result.get('all_methods', []))} methods found")
+
+        elif cmd_type == "sms_cleanup":
+            # Try to delete SMS from modem using discovered methods
+            result = await try_delete_sms_from_modem()
+            await acknowledge_command(client_key, cmd_id, True, result=result)
+            log(f"SMS cleanup complete")
+
         else:
             log(f"Unknown command type: {cmd_type}")
             await acknowledge_command(client_key, cmd_id, False, f"Unknown command: {cmd_type}")
@@ -674,6 +686,189 @@ async def probe_modem_debug() -> dict:
                         break
                 except Exception as e:
                     results[f"login_{name}_error"] = str(e)
+
+    return results
+
+
+async def discover_modem_api_methods() -> dict:
+    """Fetch modem's web panel JS files and extract all JSON-RPC method names."""
+    import re
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+    result = {"all_methods": [], "sms_methods": [], "delete_methods": [],
+              "set_methods": [], "js_files_checked": []}
+
+    if not HAS_HTTPX:
+        result["error"] = "httpx not available"
+        return result
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            # Get main page to find JS files
+            resp = await client.get(base_url)
+            scripts = re.findall(r'src="([^"]+\.js[^"]*)"', resp.text)
+
+            all_methods = set()
+            for script_path in scripts:
+                url = f"{base_url}/{script_path.lstrip('/')}"
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        js_text = resp.text
+                        result["js_files_checked"].append(
+                            f"{script_path} ({len(js_text)} bytes)"
+                        )
+                        # Extract JSON-RPC method names: "MethodName" in method calls
+                        # Pattern: "method":"MethodName" or method:"MethodName"
+                        methods = re.findall(
+                            r'["\']method["\']\s*[,:]\s*["\']([A-Z][a-zA-Z]+)["\']',
+                            js_text
+                        )
+                        all_methods.update(methods)
+                        # Also find function-style references
+                        methods2 = re.findall(
+                            r'(?:method|api_method|action)\s*(?:=|:)\s*["\']([A-Z][a-zA-Z]+)["\']',
+                            js_text
+                        )
+                        all_methods.update(methods2)
+                except Exception:
+                    pass
+
+            result["all_methods"] = sorted(all_methods)
+            result["sms_methods"] = sorted(
+                m for m in all_methods if "sms" in m.lower()
+            )
+            result["delete_methods"] = sorted(
+                m for m in all_methods if "delete" in m.lower() or "clear" in m.lower() or "remove" in m.lower()
+            )
+            result["set_methods"] = sorted(
+                m for m in all_methods if m.startswith("Set")
+            )
+            result["total_methods"] = len(all_methods)
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+async def try_delete_sms_from_modem() -> dict:
+    """Try multiple methods to delete SMS from modem."""
+    import re
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+    results = {"methods_tried": [], "success": False, "sms_before": 0, "sms_after": 0}
+
+    if not HAS_HTTPX:
+        results["error"] = "httpx not available"
+        return results
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            # Get token
+            resp = await client.get(base_url)
+            m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+            if not m:
+                results["error"] = "Cannot extract token"
+                return results
+
+            token = m.group(1)
+            headers = {
+                "_TclRequestVerificationKey": token,
+                "Referer": f"http://{MODEM_HOST}/index.html",
+            }
+
+            # Login
+            resp = await client.post(f"{base_url}/jrd/webapi",
+                json={"jsonrpc": "2.0", "method": "Login",
+                      "params": {"UserName": "admin", "Password": "admin"},
+                      "id": "1"}, headers=headers)
+            if "error" in resp.json():
+                results["error"] = f"Login failed: {resp.text[:200]}"
+                return results
+
+            # Count SMS before
+            resp = await client.post(f"{base_url}/jrd/webapi",
+                json={"jsonrpc": "2.0", "method": "GetSMSContactList",
+                      "params": {"Page": 0, "ContactNum": 100},
+                      "id": "2"}, headers=headers)
+            contacts = (resp.json().get("result") or {}).get("SMSContactList") or []
+            total_before = sum(c.get("TSMSCount", 0) for c in contacts)
+            results["sms_before"] = total_before
+            results["contacts_before"] = len(contacts)
+
+            # Check storage state
+            try:
+                resp = await client.post(f"{base_url}/jrd/webapi",
+                    json={"jsonrpc": "2.0", "method": "GetSMSStorageState",
+                          "params": {}, "id": "3"}, headers=headers)
+                results["storage_state"] = resp.json()
+            except Exception:
+                pass
+
+            # Try delete methods
+            contact_ids = [c.get("ContactId") for c in contacts if c.get("ContactId")]
+            sms_ids = [c.get("SMSId") for c in contacts if c.get("SMSId")]
+
+            delete_attempts = [
+                # Method, Params, Description
+                ("DeleteSMS", {"SMSId": sms_ids[0] if sms_ids else 0}, "by SMSId"),
+                ("DeleteSMS", {"ContactId": contact_ids[0] if contact_ids else 0, "Flag": 0}, "by ContactId+Flag0"),
+                ("DeleteSMS", {"ContactId": contact_ids[0] if contact_ids else 0, "Flag": 1}, "by ContactId+Flag1"),
+                ("DeleteSMS", {"Flag": 2}, "DeleteAll Flag2"),
+                ("DeleteAllSMS", {}, "DeleteAllSMS"),
+                ("ClearSMS", {}, "ClearSMS"),
+                ("SetSMSRead", {"SMSId": sms_ids[0] if sms_ids else 0, "Flag": 1}, "SetSMSRead"),
+                ("SetDeviceReboot", {}, "Reboot modem"),
+            ]
+
+            req_id = 10
+            for method, params, desc in delete_attempts:
+                try:
+                    resp = await client.post(f"{base_url}/jrd/webapi",
+                        json={"jsonrpc": "2.0", "method": method,
+                              "params": params, "id": str(req_id)},
+                        headers=headers)
+                    resp_data = resp.json()
+                    success = "result" in resp_data and "error" not in resp_data
+                    results["methods_tried"].append({
+                        "method": method,
+                        "params": params,
+                        "desc": desc,
+                        "success": success,
+                        "response": str(resp_data)[:200],
+                    })
+                    if success and method == "SetDeviceReboot":
+                        results["modem_rebooted"] = True
+                        break
+                    req_id += 1
+                except Exception as e:
+                    results["methods_tried"].append({
+                        "method": method, "desc": desc,
+                        "success": False, "error": str(e),
+                    })
+
+            # Count SMS after (if modem didn't reboot)
+            if not results.get("modem_rebooted"):
+                try:
+                    resp = await client.post(f"{base_url}/jrd/webapi",
+                        json={"jsonrpc": "2.0", "method": "GetSMSContactList",
+                              "params": {"Page": 0, "ContactNum": 100},
+                              "id": "99"}, headers=headers)
+                    contacts_after = (resp.json().get("result") or {}).get("SMSContactList") or []
+                    results["sms_after"] = sum(c.get("TSMSCount", 0) for c in contacts_after)
+                    results["success"] = results["sms_after"] < total_before
+                except Exception:
+                    pass
+
+                # Logout
+                try:
+                    await client.post(f"{base_url}/jrd/webapi",
+                        json={"jsonrpc": "2.0", "method": "Logout",
+                              "params": {}, "id": "100"}, headers=headers)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        results["error"] = str(e)
 
     return results
 
