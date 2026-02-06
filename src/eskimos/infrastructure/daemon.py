@@ -69,6 +69,8 @@ AUTO_UPDATE_ENABLED = os.getenv("ESKIMOS_AUTO_UPDATE", "true").lower() == "true"
 # SMS counters (runtime, reset on daemon restart)
 _sms_sent_today = 0
 _sms_sent_total = 0
+_last_sms_error = ""
+_sms_modem = None
 
 
 # ==================== Logging ====================
@@ -269,6 +271,7 @@ async def get_sms_metrics() -> dict:
         "sms_sent_today": _sms_sent_today,
         "sms_sent_total": _sms_sent_total,
         "sms_pending": pending,
+        "last_sms_error": _last_sms_error,
     }
 
 
@@ -613,8 +616,6 @@ async def run_diagnostic() -> dict:
 
 # ==================== SMS Queue Polling ====================
 
-_sms_modem = None  # Reusable modem adapter instance
-
 
 async def _get_modem_adapter():
     """Get or create a connected JsonRpcModemAdapter."""
@@ -655,12 +656,13 @@ async def poll_and_send_sms() -> bool:
 
     Returns True if an SMS was sent, False otherwise.
     """
-    global _sms_sent_today, _sms_sent_total
+    global _sms_sent_today, _sms_sent_total, _last_sms_error
     if not HAS_HTTPX:
         return False
 
+    sms_key = None
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             # Check for pending SMS
             resp = await client.get(
                 f"{ESKIMOS_PHP_API}/get-sms.php",
@@ -668,6 +670,7 @@ async def poll_and_send_sms() -> bool:
             )
 
             if resp.status_code != 200:
+                _last_sms_error = f"API {resp.status_code}"
                 log(f"SMS poll: API returned {resp.status_code}")
                 return False
 
@@ -681,17 +684,21 @@ async def poll_and_send_sms() -> bool:
             sms_message = sms.get("sms_message")
 
             if not sms_key or not sms_to or not sms_message:
+                _last_sms_error = f"incomplete data key={sms_key}"
                 log(f"SMS poll: incomplete data - key={sms_key}")
                 return False
 
             log(f"SMS queued: to={sms_to}, key={sms_key[:12]}..., len={len(sms_message)}")
 
             # Connect to modem and send
+            log(f"SMS: connecting to modem {MODEM_HOST}:{MODEM_PORT}...")
             adapter = await _get_modem_adapter()
             if not adapter:
+                _last_sms_error = f"modem connect failed {MODEM_HOST}:{MODEM_PORT}"
                 log("SMS send FAILED: cannot connect to modem")
                 return False
 
+            log(f"SMS: modem connected, sending to {sms_to}...")
             result = await adapter.send_sms(sms_to, sms_message)
 
             if result.success:
@@ -706,14 +713,21 @@ async def poll_and_send_sms() -> bool:
                 )
                 _sms_sent_today += 1
                 _sms_sent_total += 1
+                _last_sms_error = ""
                 log(f"SMS SENT: to={sms_to}, key={sms_key[:12]}... (today: {_sms_sent_today})")
                 return True
             else:
+                _last_sms_error = f"send failed: {result.error}"
                 log(f"SMS send FAILED: {result.error}")
+                # Disconnect and reset adapter for next attempt
+                await _disconnect_modem()
                 return False
 
     except Exception as e:
+        _last_sms_error = f"exception: {e}"
         log(f"SMS poll error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
