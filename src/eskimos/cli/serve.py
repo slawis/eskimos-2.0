@@ -8,11 +8,18 @@ Usage:
 
 from __future__ import annotations
 
+import sys
 import typer
-from rich.console import Console
-from rich.panel import Panel
 
-console = Console()
+# Check if running in a terminal (not as Windows Service)
+IS_TTY = sys.stdout is not None and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+if IS_TTY:
+    from rich.console import Console
+    from rich.panel import Panel
+    console = Console()
+else:
+    console = None
 
 
 def serve_command(
@@ -48,26 +55,30 @@ def serve_command(
     try:
         import uvicorn
     except ImportError:
-        console.print(
-            "[bold red]Error:[/bold red] uvicorn not installed. "
-            "Run: pip install uvicorn"
-        )
+        print("Error: uvicorn not installed. Run: pip install uvicorn")
         raise typer.Exit(1)
 
-    # Show startup message
-    console.print()
-    console.print(
-        Panel.fit(
-            f"[bold green]Eskimos 2.0 Dashboard[/bold green]\n\n"
-            f"Server:  http://{host}:{port}\n"
-            f"API:     http://{host}:{port}/api/docs\n"
-            f"Health:  http://{host}:{port}/api/health\n\n"
-            f"[dim]Press Ctrl+C to stop[/dim]",
-            title="🚀 Starting",
-            border_style="green",
-        )
-    )
-    console.print()
+    # Show startup message (only if running in terminal)
+    if console and IS_TTY:
+        try:
+            console.print()
+            console.print(
+                Panel.fit(
+                    f"[bold green]Eskimos 2.0 Dashboard[/bold green]\n\n"
+                    f"Server:  http://{host}:{port}\n"
+                    f"API:     http://{host}:{port}/api/docs\n"
+                    f"Health:  http://{host}:{port}/api/health\n\n"
+                    f"[dim]Press Ctrl+C to stop[/dim]",
+                    title="Starting",
+                    border_style="green",
+                )
+            )
+            console.print()
+        except Exception:
+            # Fallback if rich fails
+            print(f"Eskimos 2.0 Dashboard starting on http://{host}:{port}")
+    else:
+        print(f"Eskimos 2.0 Dashboard starting on http://{host}:{port}")
 
     # Run uvicorn
     uvicorn.run(

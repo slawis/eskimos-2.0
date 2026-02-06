@@ -48,6 +48,7 @@ UPDATE_DIR = PORTABLE_ROOT / "_updates"
 LOG_FILE = PORTABLE_ROOT / "updater.log"
 
 CENTRAL_API = os.getenv("ESKIMOS_CENTRAL_API", "https://app.ninjabot.pl/api/eskimos")
+DOWNLOAD_BASE_URL = os.getenv("ESKIMOS_DOWNLOAD_URL", "https://app.ninjabot.pl/eskimos/downloads")
 GITHUB_REPO = os.getenv("ESKIMOS_GITHUB_REPO", "slawis/eskimos-2.0")
 
 # Ile backupow trzymac
@@ -158,6 +159,11 @@ def compare_versions(v1: str, v2: str) -> int:
 async def download_update(version: str) -> Path:
     """Download update package.
 
+    Tries sources in order:
+    1. OVH direct download (EskimosGateway.zip)
+    2. Central API endpoint
+    3. GitHub (fallback)
+
     Args:
         version: Version to download
 
@@ -167,7 +173,26 @@ async def download_update(version: str) -> Path:
     UPDATE_DIR.mkdir(exist_ok=True)
     output_file = UPDATE_DIR / f"eskimos-{version}.zip"
 
-    # Try central API first (may have pre-built packages)
+    # 1. Try OVH direct download (primary)
+    try:
+        download_url = f"{DOWNLOAD_BASE_URL}/EskimosGateway.zip"
+        log(f"Downloading from OVH: {download_url}")
+
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", download_url, timeout=300.0,
+                                      follow_redirects=True) as response:
+                if response.status_code == 200:
+                    with open(output_file, "wb") as f:
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            f.write(chunk)
+                    size_mb = output_file.stat().st_size / (1024 * 1024)
+                    log(f"Downloaded from OVH: {output_file.name} ({size_mb:.1f} MB)")
+                    return output_file
+
+    except Exception as e:
+        log(f"OVH download failed: {e}")
+
+    # 2. Try central API (may have versioned packages)
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -186,7 +211,7 @@ async def download_update(version: str) -> Path:
     except Exception as e:
         log(f"Central API download failed: {e}")
 
-    # Fallback to GitHub
+    # 3. Fallback to GitHub
     try:
         download_url = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/master.zip"
 

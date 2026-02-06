@@ -619,7 +619,7 @@ async def run_diagnostic() -> dict:
 
 async def _get_modem_adapter():
     """Get or create a connected JsonRpcModemAdapter."""
-    global _sms_modem
+    global _sms_modem, _last_sms_error
     if _sms_modem and _sms_modem._connected:
         return _sms_modem
 
@@ -630,12 +630,18 @@ async def _get_modem_adapter():
             host=MODEM_HOST,
             port=MODEM_PORT,
         )
+        log(f"Creating modem adapter for {MODEM_HOST}:{MODEM_PORT}...")
         adapter = JsonRpcModemAdapter(config)
         await adapter.connect()
+        log(f"Modem adapter connected OK")
         _sms_modem = adapter
         return adapter
     except Exception as e:
-        log(f"Modem connect error: {e}")
+        error_detail = f"modem connect error: {type(e).__name__}: {e}"
+        log(error_detail)
+        _last_sms_error = error_detail
+        import traceback
+        traceback.print_exc()
         _sms_modem = None
         return None
 

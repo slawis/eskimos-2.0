@@ -415,79 +415,351 @@ echo All services stopped.
 pause
 ''', encoding='utf-8')
 
-    # INSTALL_SERVICE.bat - Install as Windows Service (requires NSSM)
+    # INSTALL_SERVICE.bat - Install as Windows Service (uses bundled NSSM)
     install_svc_bat = build_dir / "INSTALL_SERVICE.bat"
     install_svc_bat.write_text(r'''@echo off
+setlocal EnableDelayedExpansion
+chcp 65001 >nul 2>&1
+
 :: ============================================
-:: Install Eskimos as Windows Services
-:: Requires NSSM (https://nssm.cc/)
+::  ESKIMOS GATEWAY - Windows Service Installer
+::  Installs as auto-start Windows Services
 :: ============================================
 
-cd /d "%~dp0"
+title Eskimos Service Installer
 
 :: Check for admin rights
 net session >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: This script requires Administrator privileges!
-    echo Right-click and select "Run as administrator"
-    pause
-    exit /b 1
-)
-
-:: Check for NSSM
-where nssm >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: NSSM not found!
+if %errorLevel% neq 0 (
     echo.
-    echo Download from: https://nssm.cc/download
-    echo Extract nssm.exe to this folder or add to PATH
+    echo  ========================================================
+    echo   WYMAGANE UPRAWNIENIA ADMINISTRATORA
+    echo  ========================================================
+    echo.
+    echo   Kliknij prawym przyciskiem na ten plik i wybierz:
+    echo   "Uruchom jako administrator"
+    echo.
     pause
     exit /b 1
 )
 
-set PYTHON=%~dp0python\python.exe
-set ESKIMOS=%~dp0eskimos
+:: Set paths
+set "ROOT=%~dp0"
+set "ROOT=%ROOT:~0,-1%"
+set "NSSM=%ROOT%\tools\nssm.exe"
+set "PYTHON=%ROOT%\python\python.exe"
+set "PYTHONW=%ROOT%\python\pythonw.exe"
+
+:: Check NSSM exists
+if not exist "%NSSM%" (
+    echo [ERROR] NSSM not found: %NSSM%
+    echo Please ensure tools\nssm.exe exists.
+    pause
+    exit /b 1
+)
 
 echo.
-echo Installing Eskimos Gateway service...
-nssm install EskimosGateway "%PYTHON%"
-nssm set EskimosGateway AppParameters "-m eskimos.cli.main serve --host 0.0.0.0 --port 8000"
-nssm set EskimosGateway AppDirectory "%~dp0"
-nssm set EskimosGateway AppEnvironmentExtra "PYTHONPATH=%ESKIMOS%" "PYPPETEER_EXECUTABLE_PATH=%~dp0chromium\chrome.exe"
-nssm set EskimosGateway Start SERVICE_AUTO_START
-nssm set EskimosGateway DisplayName "Eskimos SMS Gateway"
-nssm set EskimosGateway Description "SMS Gateway with AI-powered responses"
+echo  ========================================================
+echo          ESKIMOS GATEWAY - SERVICE INSTALLER
+echo  ========================================================
+echo.
+echo   Ten skrypt zainstaluje dwa serwisy Windows:
+echo.
+echo   1. EskimosGateway  - Glowna aplikacja (API + Dashboard)
+echo   2. EskimosDaemon   - Phone-home daemon (heartbeat)
+echo.
+echo   Serwisy uruchomia sie automatycznie po starcie Windows.
+echo.
+echo  ========================================================
+echo.
+
+:: Confirm installation
+set /p CONFIRM="Czy chcesz zainstalowac serwisy? (T/N): "
+if /i not "%CONFIRM%"=="T" (
+    echo Anulowano.
+    pause
+    exit /b 0
+)
 
 echo.
-echo Installing Eskimos Daemon service...
-nssm install EskimosDaemon "%PYTHON%"
-nssm set EskimosDaemon AppParameters "-m eskimos.infrastructure.daemon start"
-nssm set EskimosDaemon AppDirectory "%~dp0"
-nssm set EskimosDaemon AppEnvironmentExtra "PYTHONPATH=%ESKIMOS%"
-nssm set EskimosDaemon Start SERVICE_AUTO_START
-nssm set EskimosDaemon DisplayName "Eskimos Phone-Home Daemon"
-nssm set EskimosDaemon Description "Heartbeat and remote update daemon"
+echo [1/4] Sprawdzanie istniejacych serwisow...
+
+:: Stop existing services if running
+"%NSSM%" status EskimosGateway >nul 2>&1
+if %errorLevel% equ 0 (
+    echo       Zatrzymywanie EskimosGateway...
+    "%NSSM%" stop EskimosGateway >nul 2>&1
+    "%NSSM%" remove EskimosGateway confirm >nul 2>&1
+)
+
+"%NSSM%" status EskimosDaemon >nul 2>&1
+if %errorLevel% equ 0 (
+    echo       Zatrzymywanie EskimosDaemon...
+    "%NSSM%" stop EskimosDaemon >nul 2>&1
+    "%NSSM%" remove EskimosDaemon confirm >nul 2>&1
+)
+
+echo       OK - Gotowe do instalacji
+echo.
+
+:: Create logs directory
+if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
+
+:: ============================================
+:: Install EskimosGateway Service
+:: ============================================
+echo [2/4] Instalacja EskimosGateway...
+
+"%NSSM%" install EskimosGateway "%PYTHON%"
+"%NSSM%" set EskimosGateway AppParameters "-m eskimos.cli.main serve"
+"%NSSM%" set EskimosGateway AppDirectory "%ROOT%"
+"%NSSM%" set EskimosGateway AppEnvironmentExtra "PYTHONPATH=%ROOT%\eskimos"
+"%NSSM%" set EskimosGateway DisplayName "Eskimos SMS Gateway"
+"%NSSM%" set EskimosGateway Description "Eskimos SMS Gateway - API and Dashboard for SMS automation"
+"%NSSM%" set EskimosGateway Start SERVICE_AUTO_START
+"%NSSM%" set EskimosGateway AppStdout "%ROOT%\logs\gateway_service.log"
+"%NSSM%" set EskimosGateway AppStderr "%ROOT%\logs\gateway_error.log"
+"%NSSM%" set EskimosGateway AppRotateFiles 1
+"%NSSM%" set EskimosGateway AppRotateBytes 10485760
+
+echo       OK - EskimosGateway zainstalowany
+echo.
+
+:: ============================================
+:: Install EskimosDaemon Service
+:: ============================================
+echo [3/4] Instalacja EskimosDaemon...
+
+"%NSSM%" install EskimosDaemon "%PYTHONW%"
+"%NSSM%" set EskimosDaemon AppParameters "-m eskimos.infrastructure.daemon start"
+"%NSSM%" set EskimosDaemon AppDirectory "%ROOT%"
+"%NSSM%" set EskimosDaemon AppEnvironmentExtra "PYTHONPATH=%ROOT%\eskimos"
+"%NSSM%" set EskimosDaemon DisplayName "Eskimos Phone-Home Daemon"
+"%NSSM%" set EskimosDaemon Description "Eskimos Daemon - Heartbeat and remote management"
+"%NSSM%" set EskimosDaemon Start SERVICE_AUTO_START
+"%NSSM%" set EskimosDaemon AppStdout "%ROOT%\logs\daemon_service.log"
+"%NSSM%" set EskimosDaemon AppStderr "%ROOT%\logs\daemon_error.log"
+"%NSSM%" set EskimosDaemon AppRotateFiles 1
+"%NSSM%" set EskimosDaemon AppRotateBytes 10485760
+"%NSSM%" set EskimosDaemon DependOnService EskimosGateway
+
+echo       OK - EskimosDaemon zainstalowany
+echo.
+
+:: ============================================
+:: Start services
+:: ============================================
+echo [4/4] Uruchamianie serwisow...
+
+"%NSSM%" start EskimosGateway
+timeout /t 3 /nobreak >nul
+"%NSSM%" start EskimosDaemon
 
 echo.
-echo ========================================
-echo    SERVICES INSTALLED
-echo ========================================
+echo  ========================================================
+echo              INSTALACJA ZAKONCZONA POMYSLNIE
+echo  ========================================================
 echo.
-echo Starting services...
-nssm start EskimosGateway
-nssm start EskimosDaemon
+echo   Serwisy zostaly zainstalowane i uruchomione.
+echo   Uruchomia sie automatycznie po kazdym starcie Windows.
+echo.
+echo   Zarzadzanie:
+echo     - SERVICE_STATUS.bat    - sprawdz status
+echo     - SERVICE_STOP.bat      - zatrzymaj serwisy
+echo     - SERVICE_START.bat     - uruchom serwisy
+echo     - UNINSTALL_SERVICE.bat - odinstaluj
+echo.
+echo   Lub przez Windows Services (services.msc):
+echo     - Eskimos SMS Gateway
+echo     - Eskimos Phone-Home Daemon
+echo.
+echo  ========================================================
+echo.
 
-echo.
-echo Done! Services will auto-start on boot.
-echo.
-echo Management:
-echo   nssm status EskimosGateway
-echo   nssm stop EskimosGateway
-echo   nssm start EskimosGateway
-echo   nssm remove EskimosGateway confirm
-echo.
 pause
 ''', encoding='utf-8')
+
+    # SERVICE_STATUS.bat
+    svc_status_bat = build_dir / "SERVICE_STATUS.bat"
+    svc_status_bat.write_text(r'''@echo off
+setlocal EnableDelayedExpansion
+chcp 65001 >nul 2>&1
+
+set "ROOT=%~dp0"
+set "ROOT=%ROOT:~0,-1%"
+set "NSSM=%ROOT%\tools\nssm.exe"
+
+echo.
+echo  ========================================================
+echo            ESKIMOS GATEWAY - STATUS SERWISOW
+echo  ========================================================
+echo.
+
+echo   EskimosGateway (API + Dashboard):
+"%NSSM%" status EskimosGateway 2>nul
+if %errorLevel% neq 0 (
+    echo     Status: NIE ZAINSTALOWANY
+)
+echo.
+
+echo   EskimosDaemon (Phone-Home):
+"%NSSM%" status EskimosDaemon 2>nul
+if %errorLevel% neq 0 (
+    echo     Status: NIE ZAINSTALOWANY
+)
+echo.
+
+echo  ========================================================
+echo.
+
+if /i not "%1"=="nopause" pause
+''', encoding='utf-8')
+
+    # SERVICE_START.bat
+    svc_start_bat = build_dir / "SERVICE_START.bat"
+    svc_start_bat.write_text(r'''@echo off
+chcp 65001 >nul 2>&1
+
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo   WYMAGANE UPRAWNIENIA ADMINISTRATORA
+    pause
+    exit /b 1
+)
+
+set "ROOT=%~dp0"
+set "NSSM=%ROOT%tools\nssm.exe"
+
+echo.
+echo   Uruchamianie serwisow Eskimos...
+echo.
+
+"%NSSM%" start EskimosGateway
+timeout /t 2 /nobreak >nul
+"%NSSM%" start EskimosDaemon
+
+echo.
+echo   Serwisy uruchomione.
+echo.
+call "%ROOT%SERVICE_STATUS.bat" nopause
+pause
+''', encoding='utf-8')
+
+    # SERVICE_STOP.bat
+    svc_stop_bat = build_dir / "SERVICE_STOP.bat"
+    svc_stop_bat.write_text(r'''@echo off
+chcp 65001 >nul 2>&1
+
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo   WYMAGANE UPRAWNIENIA ADMINISTRATORA
+    pause
+    exit /b 1
+)
+
+set "ROOT=%~dp0"
+set "NSSM=%ROOT%tools\nssm.exe"
+
+echo.
+echo   Zatrzymywanie serwisow Eskimos...
+echo.
+
+"%NSSM%" stop EskimosDaemon
+"%NSSM%" stop EskimosGateway
+
+echo.
+echo   Serwisy zatrzymane.
+echo.
+call "%ROOT%SERVICE_STATUS.bat" nopause
+pause
+''', encoding='utf-8')
+
+    # UNINSTALL_SERVICE.bat
+    uninstall_svc_bat = build_dir / "UNINSTALL_SERVICE.bat"
+    uninstall_svc_bat.write_text(r'''@echo off
+setlocal EnableDelayedExpansion
+chcp 65001 >nul 2>&1
+
+title Eskimos Service Uninstaller
+
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo.
+    echo   WYMAGANE UPRAWNIENIA ADMINISTRATORA
+    echo   Kliknij prawym przyciskiem i wybierz "Uruchom jako administrator"
+    echo.
+    pause
+    exit /b 1
+)
+
+set "ROOT=%~dp0"
+set "ROOT=%ROOT:~0,-1%"
+set "NSSM=%ROOT%\tools\nssm.exe"
+
+echo.
+echo  ========================================================
+echo         ESKIMOS GATEWAY - SERVICE UNINSTALLER
+echo  ========================================================
+echo.
+echo   Ten skrypt usunie serwisy Eskimos z systemu.
+echo.
+
+set /p CONFIRM="Czy na pewno chcesz odinstalowac serwisy? (T/N): "
+if /i not "%CONFIRM%"=="T" (
+    echo Anulowano.
+    pause
+    exit /b 0
+)
+
+echo.
+echo [1/2] Zatrzymywanie i usuwanie EskimosDaemon...
+"%NSSM%" stop EskimosDaemon >nul 2>&1
+"%NSSM%" remove EskimosDaemon confirm >nul 2>&1
+echo       OK
+
+echo.
+echo [2/2] Zatrzymywanie i usuwanie EskimosGateway...
+"%NSSM%" stop EskimosGateway >nul 2>&1
+"%NSSM%" remove EskimosGateway confirm >nul 2>&1
+echo       OK
+
+echo.
+echo  ========================================================
+echo              DEINSTALACJA ZAKONCZONA
+echo  ========================================================
+echo.
+echo   Serwisy zostaly usuniete.
+echo   Mozesz uruchamiac Eskimos recznie przez START_ALL.bat
+echo.
+echo  ========================================================
+echo.
+
+pause
+''', encoding='utf-8')
+
+
+def copy_tools(build_dir: Path) -> None:
+    """Copy NSSM and other tools."""
+    tools_src = PROJECT_ROOT / "tools"
+    tools_dest = build_dir / "tools"
+    tools_dest.mkdir(exist_ok=True)
+
+    nssm_src = tools_src / "nssm.exe"
+    if nssm_src.exists():
+        print("Copying NSSM service manager...")
+        shutil.copy2(nssm_src, tools_dest / "nssm.exe")
+    else:
+        print("WARNING: tools/nssm.exe not found! INSTALL_SERVICE.bat won't work.")
+
+
+def copy_readme(build_dir: Path) -> None:
+    """Copy README.txt to build."""
+    readme_src = PROJECT_ROOT / "scripts" / "README.txt"
+    if readme_src.exists():
+        print("Copying README.txt...")
+        shutil.copy2(readme_src, build_dir / "README.txt")
+    else:
+        print("WARNING: scripts/README.txt not found!")
 
 
 def create_config(build_dir: Path) -> None:
@@ -542,6 +814,8 @@ def main() -> None:
     setup_chrome(BUILD_DIR)
     copy_eskimos(BUILD_DIR)
     create_batch_files(BUILD_DIR)
+    copy_tools(BUILD_DIR)
+    copy_readme(BUILD_DIR)
     create_config(BUILD_DIR)
 
     # Rename build dir to output name
@@ -561,7 +835,8 @@ def main() -> None:
     print("\nNext steps:")
     print("1. Upload to GitHub Releases or share via Google Drive")
     print("2. User downloads and extracts to C:\\EskimosGateway\\")
-    print("3. Double-click START_DASHBOARD.bat")
+    print("3. Run INSTALL_SERVICE.bat as Administrator")
+    print("4. Done! Auto-start on boot, remote updates enabled.")
 
 
 if __name__ == "__main__":
