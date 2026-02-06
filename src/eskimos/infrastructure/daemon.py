@@ -71,6 +71,7 @@ _sms_sent_today = 0
 _sms_sent_total = 0
 _last_sms_error = ""
 _sms_modem = None
+_processed_sms_ids = set()  # Track processed SMSIds to prevent duplicates
 
 
 # ==================== Logging ====================
@@ -891,26 +892,28 @@ async def _modem_receive_sms_direct() -> list:
 
                 for sms in sms_list:
                     sms_type = sms.get("SMSType", 0)
-                    log(f"Incoming SMS: msg SMSId={sms.get('SMSId')}, type={sms_type}, content={sms.get('SMSContent', '')[:50]}")
+                    sms_id = sms.get("SMSId")
+                    log(f"Incoming SMS: msg SMSId={sms_id}, type={sms_type}, content={sms.get('SMSContent', '')[:50]}")
                     # TCL/Alcatel IK41: SMSType=0 means sent by us, SMSType=2 means received
-                    if sms_type != 0:
+                    # Skip already processed messages (in case DeleteSMS doesn't work)
+                    if sms_type != 0 and sms_id not in _processed_sms_ids:
                         messages.append({
                             "sender": phone_number,
                             "content": sms.get("SMSContent", ""),
                         })
+                        _processed_sms_ids.add(sms_id)
 
-                        # 5. Delete processed SMS from modem
-                        sms_id = sms.get("SMSId")
-                        if sms_id is not None:
-                            try:
-                                await client.post(f"{base_url}/jrd/webapi",
-                                                   json={"jsonrpc": "2.0", "method": "DeleteSMS",
-                                                         "params": {"SMSId": sms_id},
-                                                         "id": str(req_id)},
-                                                   headers=headers)
-                                req_id += 1
-                            except Exception:
-                                pass
+                # 5. Delete entire conversation from modem (individual DeleteSMS doesn't work on IK41)
+                try:
+                    resp = await client.post(f"{base_url}/jrd/webapi",
+                                              json={"jsonrpc": "2.0", "method": "DeleteSMS",
+                                                    "params": {"ContactId": contact_id},
+                                                    "id": str(req_id)},
+                                              headers=headers)
+                    req_id += 1
+                    log(f"Incoming SMS: DeleteSMS ContactId={contact_id}: {resp.json()}")
+                except Exception as e:
+                    log(f"Incoming SMS: delete error: {e}")
 
         finally:
             # 6. Logout
