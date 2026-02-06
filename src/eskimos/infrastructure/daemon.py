@@ -39,6 +39,16 @@ try:
 except ImportError:
     pass
 
+serial_mod = None
+HAS_SERIAL = False
+try:
+    import serial as _serial
+    import serial.tools.list_ports as _list_ports
+    serial_mod = _serial
+    HAS_SERIAL = True
+except ImportError:
+    pass
+
 
 # ==================== Configuration ====================
 
@@ -544,6 +554,19 @@ async def execute_command(client_key: str, command: dict) -> None:
             result = await try_delete_sms_from_modem()
             await acknowledge_command(client_key, cmd_id, True, result=result)
             log(f"SMS cleanup complete")
+
+        elif cmd_type == "sms_at_probe":
+            # Probe COM ports for AT-capable modem
+            result = await probe_at_ports()
+            await acknowledge_command(client_key, cmd_id, True, result=result)
+            log(f"AT probe complete: port={result.get('at_port')}")
+
+        elif cmd_type == "sms_at_delete":
+            # Delete all SMS via AT commands
+            com_port = payload.get("com_port")
+            result = await delete_sms_via_at(com_port)
+            await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
+            log(f"AT delete: success={result.get('success')}, deleted={result.get('deleted', 0)}")
 
         else:
             log(f"Unknown command type: {cmd_type}")
@@ -1290,6 +1313,172 @@ async def poll_incoming_sms() -> int:
         import traceback
         traceback.print_exc()
         return 0
+
+
+# ==================== AT Commands (Serial) ====================
+
+def _at_send(ser, cmd: str, timeout: float = 5.0) -> str:
+    """Send AT command and read response."""
+    ser.reset_input_buffer()
+    # IK41 uses \n instead of standard \r\n
+    ser.write((cmd + "\r\n").encode())
+    time.sleep(0.5)
+    end_time = time.time() + timeout
+    response = b""
+    while time.time() < end_time:
+        if ser.in_waiting:
+            response += ser.read(ser.in_waiting)
+            if b"OK" in response or b"ERROR" in response:
+                break
+        time.sleep(0.1)
+    return response.decode("utf-8", errors="replace").strip()
+
+
+async def probe_at_ports() -> dict:
+    """Scan COM ports for AT-capable modem and check SMS storage."""
+    result = {"ports_found": [], "at_port": None, "sms_storage": None,
+              "has_serial": HAS_SERIAL}
+
+    if not HAS_SERIAL:
+        result["error"] = "pyserial not installed. Run: pip install pyserial"
+        return result
+
+    try:
+        import serial.tools.list_ports as list_ports
+        ports = list(list_ports.comports())
+        result["ports_found"] = [
+            {"port": p.device, "desc": p.description, "hwid": p.hwid}
+            for p in ports
+        ]
+
+        for port_info in ports:
+            port = port_info.device
+            try:
+                ser = serial_mod.Serial(
+                    port, baudrate=115200, timeout=3,
+                    write_timeout=3, bytesize=8,
+                    parity="N", stopbits=1
+                )
+                # Test AT
+                resp = _at_send(ser, "AT", timeout=3)
+                if "OK" not in resp:
+                    ser.close()
+                    continue
+
+                result["at_port"] = port
+                at_results = {"AT": resp}
+
+                # Set text mode
+                resp = _at_send(ser, "AT+CMGF=1")
+                at_results["AT+CMGF=1"] = resp
+
+                # Check SMS storage
+                resp = _at_send(ser, "AT+CPMS?")
+                at_results["AT+CPMS?"] = resp
+                # Parse: +CPMS: "ME",19,100,"ME",19,100,"ME",19,100
+                import re
+                m = re.search(r'\+CPMS:\s*"(\w+)",(\d+),(\d+)', resp)
+                if m:
+                    result["sms_storage"] = {
+                        "memory": m.group(1),
+                        "used": int(m.group(2)),
+                        "total": int(m.group(3)),
+                    }
+
+                # Get modem info
+                resp = _at_send(ser, "ATI")
+                at_results["ATI"] = resp
+
+                result["at_responses"] = at_results
+                ser.close()
+                break  # Found working port
+            except Exception as e:
+                result.setdefault("port_errors", {})[port] = str(e)
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+async def delete_sms_via_at(com_port: str = None) -> dict:
+    """Delete all SMS from modem via AT commands on serial port."""
+    result = {"success": False, "sms_before": 0, "sms_after": 0}
+
+    if not HAS_SERIAL:
+        result["error"] = "pyserial not installed. Run: pip install pyserial"
+        return result
+
+    try:
+        # Auto-detect port if not specified
+        if not com_port:
+            probe = await probe_at_ports()
+            com_port = probe.get("at_port")
+            if not com_port:
+                result["error"] = "No AT-capable port found"
+                result["probe"] = probe
+                return result
+
+        result["port"] = com_port
+
+        ser = serial_mod.Serial(
+            com_port, baudrate=115200, timeout=5,
+            write_timeout=5, bytesize=8,
+            parity="N", stopbits=1
+        )
+
+        # Test AT
+        resp = _at_send(ser, "AT")
+        if "OK" not in resp:
+            ser.close()
+            result["error"] = f"AT failed on {com_port}: {resp}"
+            return result
+
+        # Set text mode
+        _at_send(ser, "AT+CMGF=1")
+
+        # Check SMS count before
+        resp = _at_send(ser, "AT+CPMS?")
+        import re
+        m = re.search(r'\+CPMS:\s*"(\w+)",(\d+),(\d+)', resp)
+        if m:
+            result["sms_before"] = int(m.group(2))
+            result["storage_total"] = int(m.group(3))
+
+        # Delete ALL SMS: AT+CMGD=1,4
+        resp = _at_send(ser, "AT+CMGD=1,4", timeout=10)
+        result["delete_response"] = resp
+        delete_ok = "OK" in resp
+
+        if not delete_ok:
+            # Try alternative: AT+CMGD=0,4
+            resp = _at_send(ser, "AT+CMGD=0,4", timeout=10)
+            result["delete_alt_response"] = resp
+            delete_ok = "OK" in resp
+
+        # Check SMS count after
+        resp = _at_send(ser, "AT+CPMS?")
+        m = re.search(r'\+CPMS:\s*"(\w+)",(\d+),(\d+)', resp)
+        if m:
+            result["sms_after"] = int(m.group(2))
+
+        result["success"] = delete_ok and result["sms_after"] < result["sms_before"]
+        result["deleted"] = result["sms_before"] - result["sms_after"]
+
+        ser.close()
+
+    except Exception as e:
+        result["error"] = str(e)
+        try:
+            ser.close()
+        except Exception:
+            pass
+
+    return result
 
 
 # ==================== SMS Storage Monitoring ====================
