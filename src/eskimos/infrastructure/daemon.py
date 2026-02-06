@@ -762,6 +762,109 @@ async def poll_and_send_sms() -> bool:
         return False
 
 
+async def _modem_receive_sms_direct() -> list:
+    """Read incoming SMS from modem via direct JSON-RPC.
+
+    Same proven method as _modem_send_sms_direct():
+    - URL: /jrd/webapi (no ?api= param)
+    - Headers: _TclRequestVerificationKey (CamelCase)
+    - Content: json= (not content=)
+
+    Returns list of dicts with keys: sender, content
+    """
+    import re
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        # 1. Get token
+        resp = await client.get(base_url)
+        m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+        if not m:
+            log("Incoming SMS: cannot extract modem token")
+            return []
+
+        token = m.group(1)
+        headers = {
+            "_TclRequestVerificationKey": token,
+            "Referer": f"http://{MODEM_HOST}/index.html",
+        }
+
+        # 2. Login
+        resp = await client.post(f"{base_url}/jrd/webapi",
+                                  json={"jsonrpc": "2.0", "method": "Login",
+                                        "params": {"UserName": "admin", "Password": "admin"},
+                                        "id": "1"},
+                                  headers=headers)
+        login_data = resp.json()
+        if "error" in login_data:
+            log(f"Incoming SMS: login failed: {login_data}")
+            return []
+
+        messages = []
+        try:
+            # 3. GetSMSContactList
+            resp = await client.post(f"{base_url}/jrd/webapi",
+                                      json={"jsonrpc": "2.0", "method": "GetSMSContactList",
+                                            "params": {"Page": 0, "ContactNum": 100},
+                                            "id": "2"},
+                                      headers=headers)
+            contacts_data = resp.json()
+            contact_list = contacts_data.get("result", {}).get("SMSContactList", [])
+
+            if not contact_list:
+                return []
+
+            # 4. For each contact, get messages
+            req_id = 3
+            for contact in contact_list:
+                contact_id = contact.get("ContactId")
+                phone_number = contact.get("PhoneNumber", "")
+                if not contact_id:
+                    continue
+
+                resp = await client.post(f"{base_url}/jrd/webapi",
+                                          json={"jsonrpc": "2.0", "method": "GetSMSContentList",
+                                                "params": {"ContactId": contact_id, "Page": 0},
+                                                "id": str(req_id)},
+                                          headers=headers)
+                req_id += 1
+                content_data = resp.json()
+                sms_list = content_data.get("result", {}).get("SMSContentList", [])
+
+                for sms in sms_list:
+                    # SMSType=1 means incoming (received), SMSType=0 means sent by us
+                    if sms.get("SMSType", 0) == 1:
+                        messages.append({
+                            "sender": phone_number,
+                            "content": sms.get("SMSContent", ""),
+                        })
+
+                        # 5. Delete processed SMS from modem
+                        sms_id = sms.get("SMSId")
+                        if sms_id is not None:
+                            try:
+                                await client.post(f"{base_url}/jrd/webapi",
+                                                   json={"jsonrpc": "2.0", "method": "DeleteSMS",
+                                                         "params": {"SMSId": sms_id},
+                                                         "id": str(req_id)},
+                                                   headers=headers)
+                                req_id += 1
+                            except Exception:
+                                pass
+
+        finally:
+            # 6. Logout
+            try:
+                await client.post(f"{base_url}/jrd/webapi",
+                                   json={"jsonrpc": "2.0", "method": "Logout",
+                                         "params": {}, "id": "99"},
+                                   headers=headers)
+            except Exception:
+                pass
+
+        return messages
+
+
 async def poll_incoming_sms() -> int:
     """Check modem for incoming SMS and forward to PHP API.
 
@@ -770,12 +873,8 @@ async def poll_incoming_sms() -> int:
     if not HAS_HTTPX:
         return 0
 
-    adapter = await _get_modem_adapter()
-    if not adapter:
-        return 0
-
     try:
-        messages = await adapter.receive_sms()
+        messages = await _modem_receive_sms_direct()
         if not messages:
             return 0
 
@@ -786,16 +885,18 @@ async def poll_incoming_sms() -> int:
                     await client.post(
                         f"{ESKIMOS_PHP_API}/receive-sms.php",
                         json={
-                            "sms_message": msg.content,
-                            "sms_from": msg.sender,
+                            "sms_message": msg["content"],
+                            "sms_from": msg["sender"],
                             "sms_to": MODEM_PHONE,
                         },
                     )
                     count += 1
-                    log(f"SMS RECEIVED: from={msg.sender}, len={len(msg.content)}")
+                    log(f"SMS RECEIVED: from={msg['sender']}, len={len(msg['content'])}")
                 except Exception as e:
                     log(f"Incoming SMS forward error: {e}")
 
+        if count > 0:
+            log(f"Total incoming SMS processed: {count}")
         return count
 
     except Exception as e:
