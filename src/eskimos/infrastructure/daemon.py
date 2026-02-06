@@ -605,9 +605,46 @@ async def run_diagnostic() -> dict:
     except Exception as e:
         modem_debug = {"error": str(e)}
 
+    # Test incoming SMS read from modem
+    incoming_test = {}
+    try:
+        import re
+        base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as hc:
+            resp = await hc.get(base_url)
+            m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+            if m:
+                token = m.group(1)
+                hdrs = {"_TclRequestVerificationKey": token,
+                        "Referer": f"http://{MODEM_HOST}/index.html"}
+                resp = await hc.post(f"{base_url}/jrd/webapi",
+                                      json={"jsonrpc": "2.0", "method": "Login",
+                                            "params": {"UserName": "admin", "Password": "admin"},
+                                            "id": "1"}, headers=hdrs)
+                login = resp.json()
+                incoming_test["login"] = str(login)
+                if "error" not in login:
+                    resp = await hc.post(f"{base_url}/jrd/webapi",
+                                          json={"jsonrpc": "2.0", "method": "GetSMSContactList",
+                                                "params": {"Page": 0, "ContactNum": 100},
+                                                "id": "2"}, headers=hdrs)
+                    incoming_test["contacts_raw"] = str(resp.json())
+                    # Logout
+                    try:
+                        await hc.post(f"{base_url}/jrd/webapi",
+                                       json={"jsonrpc": "2.0", "method": "Logout",
+                                             "params": {}, "id": "99"}, headers=hdrs)
+                    except Exception:
+                        pass
+            else:
+                incoming_test["error"] = "no token"
+    except Exception as e:
+        incoming_test["error"] = str(e)
+
     return {
         "modem": modem,
         "modem_debug": modem_debug,
+        "incoming_test": incoming_test,
         "metrics": metrics,
         "system": system,
         "timestamp": datetime.utcnow().isoformat(),
