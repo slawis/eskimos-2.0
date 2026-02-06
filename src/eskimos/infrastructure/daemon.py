@@ -50,6 +50,7 @@ PID_FILE = PORTABLE_ROOT / ".daemon.pid"
 CONFIG_FILE = PORTABLE_ROOT / "config" / ".env"
 BACKUP_DIR = PORTABLE_ROOT / "_backups"
 UPDATE_DIR = PORTABLE_ROOT / "_updates"
+PROCESSED_SMS_FILE = PORTABLE_ROOT / ".processed_sms.json"
 
 # API
 CENTRAL_API = os.getenv("ESKIMOS_CENTRAL_API", "https://app.ninjabot.pl/api/eskimos")
@@ -66,12 +67,21 @@ INCOMING_SMS_INTERVAL = int(os.getenv("ESKIMOS_INCOMING_SMS_INTERVAL", "60"))
 # Auto-update
 AUTO_UPDATE_ENABLED = os.getenv("ESKIMOS_AUTO_UPDATE", "true").lower() == "true"
 
+# Rate limiting
+SMS_DAILY_LIMIT = int(os.getenv("ESKIMOS_SMS_DAILY_LIMIT", "100"))
+SMS_HOURLY_LIMIT = int(os.getenv("ESKIMOS_SMS_HOURLY_LIMIT", "20"))
+
 # SMS counters (runtime, reset on daemon restart)
 _sms_sent_today = 0
 _sms_sent_total = 0
+_sms_received_today = 0
+_sms_received_total = 0
 _last_sms_error = ""
 _sms_modem = None
 _processed_sms_ids = set()  # Track processed SMSIds to prevent duplicates
+_sms_hourly_count = 0
+_sms_hourly_reset_time = 0
+_sms_rate_limited = False
 
 
 # ==================== Logging ====================
@@ -102,6 +112,42 @@ def get_or_create_client_key() -> str:
     CLIENT_KEY_FILE.write_text(key)
     log(f"Generated new client key: {key[:12]}...")
     return key
+
+
+# ==================== Processed SMS Persistence ====================
+
+def load_processed_sms_ids() -> set:
+    """Load processed SMS IDs from disk to survive daemon restarts."""
+    if PROCESSED_SMS_FILE.exists():
+        try:
+            data = json.loads(PROCESSED_SMS_FILE.read_text(encoding="utf-8"))
+            ids = set(data.get("ids", []))
+            log(f"Loaded {len(ids)} processed SMS IDs from disk")
+            return ids
+        except Exception as e:
+            log(f"Error loading processed SMS IDs: {e}")
+    return set()
+
+
+def save_processed_sms_ids() -> None:
+    """Save processed SMS IDs to disk."""
+    global _processed_sms_ids
+    try:
+        # Cap at 10000 entries - keep newest (SMSId is monotonically increasing on IK41)
+        if len(_processed_sms_ids) > 10000:
+            sorted_ids = sorted(_processed_sms_ids)
+            _processed_sms_ids = set(sorted_ids[-5000:])
+
+        data = {
+            "ids": list(_processed_sms_ids),
+            "count": len(_processed_sms_ids),
+            "updated_at": datetime.now().isoformat(),
+        }
+        PROCESSED_SMS_FILE.write_text(
+            json.dumps(data, indent=2), encoding="utf-8"
+        )
+    except Exception as e:
+        log(f"Error saving processed SMS IDs: {e}")
 
 
 # ==================== System Info ====================
@@ -254,6 +300,34 @@ async def get_modem_status() -> dict:
     }
 
 
+def check_rate_limit() -> tuple:
+    """Check if SMS sending is within rate limits.
+
+    Returns (allowed: bool, reason: str).
+    """
+    global _sms_hourly_count, _sms_hourly_reset_time, _sms_rate_limited
+
+    now = time.time()
+
+    # Reset hourly counter every hour
+    if now - _sms_hourly_reset_time >= 3600:
+        _sms_hourly_count = 0
+        _sms_hourly_reset_time = now
+
+    # Check daily limit
+    if _sms_sent_today >= SMS_DAILY_LIMIT:
+        _sms_rate_limited = True
+        return False, f"Daily limit reached: {_sms_sent_today}/{SMS_DAILY_LIMIT}"
+
+    # Check hourly limit
+    if _sms_hourly_count >= SMS_HOURLY_LIMIT:
+        _sms_rate_limited = True
+        return False, f"Hourly limit reached: {_sms_hourly_count}/{SMS_HOURLY_LIMIT}"
+
+    _sms_rate_limited = False
+    return True, ""
+
+
 async def get_sms_metrics() -> dict:
     """Get SMS metrics - local counters + pending from PHP API."""
     pending = 0
@@ -271,8 +345,14 @@ async def get_sms_metrics() -> dict:
     return {
         "sms_sent_today": _sms_sent_today,
         "sms_sent_total": _sms_sent_total,
+        "sms_received_today": _sms_received_today,
+        "sms_received_total": _sms_received_total,
         "sms_pending": pending,
         "last_sms_error": _last_sms_error,
+        "rate_limited": _sms_rate_limited,
+        "daily_limit": SMS_DAILY_LIMIT,
+        "hourly_limit": SMS_HOURLY_LIMIT,
+        "hourly_count": _sms_hourly_count,
     }
 
 
@@ -456,6 +536,7 @@ async def execute_command(client_key: str, command: dict) -> None:
 
 def apply_config(new_config: dict) -> None:
     """Apply new configuration values to .env file."""
+    global SMS_DAILY_LIMIT, SMS_HOURLY_LIMIT
     try:
         env_content = ""
         if CONFIG_FILE.exists():
@@ -476,6 +557,14 @@ def apply_config(new_config: dict) -> None:
         # Write back
         new_content = "\n".join(f"{k}={v}" for k, v in env_lines.items())
         CONFIG_FILE.write_text(new_content)
+
+        # Reload rate limits from new config
+        if "sms_daily_limit" in new_config:
+            SMS_DAILY_LIMIT = int(new_config["sms_daily_limit"])
+            log(f"Daily SMS limit updated: {SMS_DAILY_LIMIT}")
+        if "sms_hourly_limit" in new_config:
+            SMS_HOURLY_LIMIT = int(new_config["sms_hourly_limit"])
+            log(f"Hourly SMS limit updated: {SMS_HOURLY_LIMIT}")
 
     except Exception as e:
         log(f"Config apply error: {e}")
@@ -740,8 +829,14 @@ async def poll_and_send_sms() -> bool:
 
     Returns True if an SMS was sent, False otherwise.
     """
-    global _sms_sent_today, _sms_sent_total, _last_sms_error
+    global _sms_sent_today, _sms_sent_total, _last_sms_error, _sms_hourly_count
     if not HAS_HTTPX:
+        return False
+
+    # Rate limit check
+    allowed, reason = check_rate_limit()
+    if not allowed:
+        log(f"SMS rate limited: {reason}")
         return False
 
     sms_key = None
@@ -789,8 +884,9 @@ async def poll_and_send_sms() -> bool:
                 )
                 _sms_sent_today += 1
                 _sms_sent_total += 1
+                _sms_hourly_count += 1
                 _last_sms_error = ""
-                log(f"SMS SENT: to={sms_to}, key={sms_key[:12]}... (today: {_sms_sent_today})")
+                log(f"SMS SENT: to={sms_to}, key={sms_key[:12]}... (today: {_sms_sent_today}, hour: {_sms_hourly_count})")
                 return True
             else:
                 _last_sms_error = f"send failed: {error}"
@@ -890,6 +986,7 @@ async def _modem_receive_sms_direct() -> list:
                             "content": sms.get("SMSContent", ""),
                         })
                         _processed_sms_ids.add(sms_id)
+                        save_processed_sms_ids()
 
         finally:
             # 6. Logout
@@ -909,6 +1006,7 @@ async def poll_incoming_sms() -> int:
 
     Returns number of messages received.
     """
+    global _sms_received_today, _sms_received_total
     if not HAS_HTTPX:
         return 0
 
@@ -930,6 +1028,8 @@ async def poll_incoming_sms() -> int:
                         },
                     )
                     count += 1
+                    _sms_received_today += 1
+                    _sms_received_total += 1
                     log(f"SMS RECEIVED: from={msg['sender']}, len={len(msg['content'])}")
                 except Exception as e:
                     log(f"Incoming SMS forward error: {e}")
@@ -977,6 +1077,10 @@ async def daemon_loop():
     log(f"Central API: {CENTRAL_API}")
     log(f"Heartbeat: {HEARTBEAT_INTERVAL}s, Auto-update: {AUTO_UPDATE_ENABLED}")
 
+    # Load persisted processed SMS IDs to prevent duplicates after restart
+    global _processed_sms_ids
+    _processed_sms_ids = load_processed_sms_ids()
+
     # Save PID
     PID_FILE.write_text(str(os.getpid()))
 
@@ -987,6 +1091,7 @@ async def daemon_loop():
     last_incoming_poll = 0
 
     log(f"SMS polling: {SMS_POLL_INTERVAL}s, Incoming SMS: {INCOMING_SMS_INTERVAL}s")
+    log(f"Rate limits: {SMS_DAILY_LIMIT}/day, {SMS_HOURLY_LIMIT}/hour")
     log(f"PHP API: {ESKIMOS_PHP_API}")
     log(f"Modem: {MODEM_HOST}:{MODEM_PORT}, phone: {MODEM_PHONE}")
 
