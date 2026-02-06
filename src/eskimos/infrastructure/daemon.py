@@ -618,43 +618,78 @@ async def run_diagnostic() -> dict:
 
 
 async def _get_modem_adapter():
-    """Get or create a connected JsonRpcModemAdapter."""
-    global _sms_modem, _last_sms_error
-    if _sms_modem and _sms_modem._connected:
-        return _sms_modem
-
-    try:
-        from eskimos.adapters.modem.jsonrpc import JsonRpcModemAdapter, JsonRpcConfig
-        config = JsonRpcConfig(
-            phone_number=MODEM_PHONE,
-            host=MODEM_HOST,
-            port=MODEM_PORT,
-        )
-        log(f"Creating modem adapter for {MODEM_HOST}:{MODEM_PORT}...")
-        adapter = JsonRpcModemAdapter(config)
-        await adapter.connect()
-        log(f"Modem adapter connected OK")
-        _sms_modem = adapter
-        return adapter
-    except Exception as e:
-        error_detail = f"modem connect error: {type(e).__name__}: {e}"
-        log(error_detail)
-        _last_sms_error = error_detail
-        import traceback
-        traceback.print_exc()
-        _sms_modem = None
-        return None
+    """Stub - adapter disabled in favor of direct JSON-RPC calls."""
+    return None
 
 
 async def _disconnect_modem():
-    """Disconnect modem adapter."""
-    global _sms_modem
-    if _sms_modem:
+    """Stub - adapter disabled."""
+    pass
+
+
+async def _modem_send_sms_direct(recipient: str, message: str) -> tuple:
+    """Send SMS via direct JSON-RPC calls (same method as detect_modem_model_tcl).
+
+    Returns (success: bool, error: str or None)
+    """
+    import re
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        # 1. Get verification token from main page
+        resp = await client.get(base_url)
+        m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+        if not m:
+            return False, "Cannot extract modem token"
+
+        token = m.group(1)
+        headers = {
+            "_TclRequestVerificationKey": token,
+            "Referer": f"http://{MODEM_HOST}/index.html",
+        }
+
+        # 2. Login
+        login_body = {
+            "jsonrpc": "2.0", "method": "Login",
+            "params": {"UserName": "admin", "Password": "admin"}, "id": "1"
+        }
+        resp = await client.post(f"{base_url}/jrd/webapi",
+                                  json=login_body, headers=headers)
+        login_data = resp.json()
+        if "error" in login_data:
+            return False, f"Login failed: {login_data}"
+
+        log(f"Modem login OK, sending SMS to {recipient}")
+
+        # 3. Send SMS
+        from datetime import datetime as dt
+        now = dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        sms_body = {
+            "jsonrpc": "2.0", "method": "SendSMS",
+            "params": {
+                "SMSId": -1,
+                "SMSContent": message,
+                "PhoneNumber": [recipient],
+                "SMSTime": now,
+            }, "id": "2"
+        }
+        resp = await client.post(f"{base_url}/jrd/webapi",
+                                  json=sms_body, headers=headers)
+        sms_result = resp.json()
+
+        # 4. Logout
         try:
-            await _sms_modem.disconnect()
+            await client.post(f"{base_url}/jrd/webapi",
+                               json={"jsonrpc": "2.0", "method": "Logout",
+                                     "params": {}, "id": "3"},
+                               headers=headers)
         except Exception:
             pass
-        _sms_modem = None
+
+        if "error" in sms_result:
+            return False, f"SendSMS error: {sms_result.get('error')}"
+
+        return True, None
 
 
 async def poll_and_send_sms() -> bool:
@@ -696,18 +731,10 @@ async def poll_and_send_sms() -> bool:
 
             log(f"SMS queued: to={sms_to}, key={sms_key[:12]}..., len={len(sms_message)}")
 
-            # Connect to modem and send
-            log(f"SMS: connecting to modem {MODEM_HOST}:{MODEM_PORT}...")
-            adapter = await _get_modem_adapter()
-            if not adapter:
-                _last_sms_error = f"modem connect failed {MODEM_HOST}:{MODEM_PORT}"
-                log("SMS send FAILED: cannot connect to modem")
-                return False
+            # Send via direct JSON-RPC (proven method)
+            success, error = await _modem_send_sms_direct(sms_to, sms_message)
 
-            log(f"SMS: modem connected, sending to {sms_to}...")
-            result = await adapter.send_sms(sms_to, sms_message)
-
-            if result.success:
+            if success:
                 # Report success to PHP API
                 await client.post(
                     f"{ESKIMOS_PHP_API}/update-sms.php",
@@ -723,10 +750,8 @@ async def poll_and_send_sms() -> bool:
                 log(f"SMS SENT: to={sms_to}, key={sms_key[:12]}... (today: {_sms_sent_today})")
                 return True
             else:
-                _last_sms_error = f"send failed: {result.error}"
-                log(f"SMS send FAILED: {result.error}")
-                # Disconnect and reset adapter for next attempt
-                await _disconnect_modem()
+                _last_sms_error = f"send failed: {error}"
+                log(f"SMS send FAILED: {error}")
                 return False
 
     except Exception as e:
