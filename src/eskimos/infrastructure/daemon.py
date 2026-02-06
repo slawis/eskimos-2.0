@@ -717,19 +717,25 @@ async def discover_modem_api_methods() -> dict:
                         result["js_files_checked"].append(
                             f"{script_path} ({len(js_text)} bytes)"
                         )
-                        # Extract JSON-RPC method names: "MethodName" in method calls
-                        # Pattern: "method":"MethodName" or method:"MethodName"
-                        methods = re.findall(
-                            r'["\']method["\']\s*[,:]\s*["\']([A-Z][a-zA-Z]+)["\']',
+                        # Pattern 1: Quoted strings with known API verb prefixes
+                        # Minified JS has method names as function args, not next to "method" key
+                        m1 = re.findall(
+                            r'''["']((?:Get|Set|Delete|Send|Save|Clear|Remove|Check|Login|Logout|Connect|Disconnect|Start|Stop|Enable|Disable|Add|Update|Create|Reset|Change)[A-Z][a-zA-Z0-9]*?)["']''',
                             js_text
                         )
-                        all_methods.update(methods)
-                        # Also find function-style references
-                        methods2 = re.findall(
-                            r'(?:method|api_method|action)\s*(?:=|:)\s*["\']([A-Z][a-zA-Z]+)["\']',
-                            js_text
-                        )
-                        all_methods.update(methods2)
+                        all_methods.update(m1)
+                        # Pattern 2: lowercase get/set variants (TCL firmware anomaly)
+                        m2 = re.findall(r'''["']((?:get|set)[A-Z][a-zA-Z0-9]+)["']''', js_text)
+                        all_methods.update(m2)
+                        # Pattern 3: URL ?api=Method or ?name=Method
+                        m3 = re.findall(r'''[?&](?:api|name)=["']?([A-Za-z][a-zA-Z]+)["']?''', js_text)
+                        all_methods.update(m3)
+                        # Pattern 4: "method":"MethodName" (flexible)
+                        m4 = re.findall(r'''["']?method["']?\s*[,:]\s*["']([A-Za-z][a-zA-Z]+)["']''', js_text)
+                        all_methods.update(m4)
+                        # Pattern 5: Property style: GetSMS: or GetSMS=
+                        m5 = re.findall(r'''((?:Get|Set|Delete|Send|Login|Logout|get|set)[A-Z][a-zA-Z]+)\s*[:=]''', js_text)
+                        all_methods.update(m5)
                 except Exception:
                     pass
 
@@ -741,7 +747,13 @@ async def discover_modem_api_methods() -> dict:
                 m for m in all_methods if "delete" in m.lower() or "clear" in m.lower() or "remove" in m.lower()
             )
             result["set_methods"] = sorted(
-                m for m in all_methods if m.startswith("Set")
+                m for m in all_methods if m.startswith("Set") or m.startswith("set")
+            )
+            result["reboot_methods"] = sorted(
+                m for m in all_methods if "reboot" in m.lower() or "reset" in m.lower() or "factory" in m.lower()
+            )
+            result["storage_methods"] = sorted(
+                m for m in all_methods if "storage" in m.lower() or "memory" in m.lower()
             )
             result["total_methods"] = len(all_methods)
 
