@@ -892,8 +892,8 @@ async def _modem_receive_sms_direct() -> list:
                 for sms in sms_list:
                     sms_type = sms.get("SMSType", 0)
                     log(f"Incoming SMS: msg SMSId={sms.get('SMSId')}, type={sms_type}, content={sms.get('SMSContent', '')[:50]}")
-                    # SMSType=1 means incoming (received), SMSType=0 means sent by us
-                    if sms_type == 1:
+                    # TCL/Alcatel IK41: SMSType=0 means sent by us, SMSType=2 means received
+                    if sms_type != 0:
                         messages.append({
                             "sender": phone_number,
                             "content": sms.get("SMSContent", ""),
