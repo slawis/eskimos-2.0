@@ -820,16 +820,34 @@ async def try_delete_sms_from_modem() -> dict:
             contact_ids = [c.get("ContactId") for c in contacts if c.get("ContactId")]
             sms_ids = [c.get("SMSId") for c in contacts if c.get("SMSId")]
 
+            # Get individual SMS IDs from first contact's content list
+            first_sms_id = None
+            if contact_ids:
+                try:
+                    resp = await client.post(f"{base_url}/jrd/webapi",
+                        json={"jsonrpc": "2.0", "method": "GetSMSContentList",
+                              "params": {"Page": 0, "ContactId": contact_ids[0]},
+                              "id": "4"}, headers=headers)
+                    sms_list = (resp.json().get("result") or {}).get("SMSContentList") or []
+                    if sms_list:
+                        first_sms_id = sms_list[0].get("SMSId")
+                        results["first_sms_detail"] = sms_list[0]
+                except Exception:
+                    pass
+
             delete_attempts = [
-                # Method, Params, Description
-                ("DeleteSMS", {"SMSId": sms_ids[0] if sms_ids else 0}, "by SMSId"),
-                ("DeleteSMS", {"ContactId": contact_ids[0] if contact_ids else 0, "Flag": 0}, "by ContactId+Flag0"),
-                ("DeleteSMS", {"ContactId": contact_ids[0] if contact_ids else 0, "Flag": 1}, "by ContactId+Flag1"),
-                ("DeleteSMS", {"Flag": 2}, "DeleteAll Flag2"),
-                ("DeleteAllSMS", {}, "DeleteAllSMS"),
-                ("ClearSMS", {}, "ClearSMS"),
-                ("SetSMSRead", {"SMSId": sms_ids[0] if sms_ids else 0, "Flag": 1}, "SetSMSRead"),
-                ("SetDeviceReboot", {}, "Reboot modem"),
+                # Discovered methods from modem's JS
+                ("DeleteALLsingle", {}, "DeleteALLsingle (no params)"),
+                ("DeleteALLsingle", {"ContactId": contact_ids[0] if contact_ids else 0}, "DeleteALLsingle by ContactId"),
+                ("DeleteALLsingle", {"SMSId": first_sms_id or (sms_ids[0] if sms_ids else 0)}, "DeleteALLsingle by SMSId"),
+                # Standard DeleteSMS with actual SMS content ID
+                ("DeleteSMS", {"SMSId": first_sms_id or 0}, "DeleteSMS by content SMSId"),
+                ("DeleteSMS", {"SMSId": first_sms_id or 0, "Flag": 0}, "DeleteSMS SMSId+Flag0"),
+                ("DeleteSMS", {"ContactId": contact_ids[0] if contact_ids else 0, "Flag": 0}, "DeleteSMS ContactId+Flag0"),
+                ("DeleteSMS", {"ContactId": contact_ids[0] if contact_ids else 0, "Flag": 1}, "DeleteSMS ContactId+Flag1"),
+                ("DeleteSMS", {"Flag": 2}, "DeleteSMS Flag2 (delete all)"),
+                # Other approaches
+                ("SetSMSSettings", {"SaveSMS": 0}, "Disable SMS saving"),
             ]
 
             req_id = 10
@@ -841,16 +859,30 @@ async def try_delete_sms_from_modem() -> dict:
                         headers=headers)
                     resp_data = resp.json()
                     success = "result" in resp_data and "error" not in resp_data
-                    results["methods_tried"].append({
+                    attempt = {
                         "method": method,
                         "params": params,
                         "desc": desc,
                         "success": success,
-                        "response": str(resp_data)[:200],
-                    })
-                    if success and method == "SetDeviceReboot":
-                        results["modem_rebooted"] = True
-                        break
+                        "response": str(resp_data)[:300],
+                    }
+                    # Check if SMS count changed after successful call
+                    if success:
+                        try:
+                            resp2 = await client.post(f"{base_url}/jrd/webapi",
+                                json={"jsonrpc": "2.0", "method": "GetSMSContactList",
+                                      "params": {"Page": 0, "ContactNum": 100},
+                                      "id": str(req_id + 100)},
+                                headers=headers)
+                            c_after = (resp2.json().get("result") or {}).get("SMSContactList") or []
+                            count_after = sum(c.get("TSMSCount", 0) for c in c_after)
+                            attempt["sms_count_after"] = count_after
+                            if count_after < total_before:
+                                attempt["sms_deleted"] = total_before - count_after
+                                results["working_method"] = desc
+                        except Exception:
+                            pass
+                    results["methods_tried"].append(attempt)
                     req_id += 1
                 except Exception as e:
                     results["methods_tried"].append({
