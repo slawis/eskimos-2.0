@@ -628,7 +628,18 @@ async def run_diagnostic() -> dict:
                                           json={"jsonrpc": "2.0", "method": "GetSMSContactList",
                                                 "params": {"Page": 0, "ContactNum": 100},
                                                 "id": "2"}, headers=hdrs)
-                    incoming_test["contacts_raw"] = str(resp.json())
+                    contacts = resp.json()
+                    incoming_test["contacts_raw"] = str(contacts)
+                    # Also get content list for first contact
+                    clist = (contacts.get("result") or {}).get("SMSContactList") or []
+                    if clist:
+                        cid = clist[0].get("ContactId")
+                        if cid:
+                            resp = await hc.post(f"{base_url}/jrd/webapi",
+                                                  json={"jsonrpc": "2.0", "method": "GetSMSContentList",
+                                                        "params": {"ContactId": cid, "Page": 0},
+                                                        "id": "3"}, headers=hdrs)
+                            incoming_test["content_raw"] = str(resp.json())
                     # Logout
                     try:
                         await hc.post(f"{base_url}/jrd/webapi",
@@ -858,7 +869,13 @@ async def _modem_receive_sms_direct() -> list:
             req_id = 3
             for contact in contact_list:
                 contact_id = contact.get("ContactId")
-                phone_number = contact.get("PhoneNumber", "")
+                # PhoneNumber can be a list ['797053850'] or string '797053850'
+                phone_raw = contact.get("PhoneNumber", "")
+                if isinstance(phone_raw, list):
+                    phone_number = phone_raw[0] if phone_raw else ""
+                else:
+                    phone_number = str(phone_raw)
+                log(f"Incoming SMS: contact {contact_id}, phone={phone_number}, unread={contact.get('UnreadCount')}")
                 if not contact_id:
                     continue
 
@@ -873,8 +890,10 @@ async def _modem_receive_sms_direct() -> list:
                 sms_list = (content_data.get("result") or {}).get("SMSContentList") or []
 
                 for sms in sms_list:
+                    sms_type = sms.get("SMSType", 0)
+                    log(f"Incoming SMS: msg SMSId={sms.get('SMSId')}, type={sms_type}, content={sms.get('SMSContent', '')[:50]}")
                     # SMSType=1 means incoming (received), SMSType=0 means sent by us
-                    if sms.get("SMSType", 0) == 1:
+                    if sms_type == 1:
                         messages.append({
                             "sender": phone_number,
                             "content": sms.get("SMSContent", ""),
