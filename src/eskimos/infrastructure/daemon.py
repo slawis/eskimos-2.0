@@ -53,15 +53,22 @@ UPDATE_DIR = PORTABLE_ROOT / "_updates"
 
 # API
 CENTRAL_API = os.getenv("ESKIMOS_CENTRAL_API", "https://app.ninjabot.pl/api/eskimos")
+ESKIMOS_PHP_API = os.getenv("ESKIMOS_PHP_API", "https://eskimos.ninjabot.pl/api/v2")
 HEARTBEAT_API_KEY = os.getenv("ESKIMOS_API_KEY", "eskimos-daemon-2026")
 
 # Interwaly (sekundy)
 HEARTBEAT_INTERVAL = int(os.getenv("ESKIMOS_HEARTBEAT_INTERVAL", "60"))
 COMMAND_POLL_INTERVAL = int(os.getenv("ESKIMOS_COMMAND_POLL_INTERVAL", "60"))
 UPDATE_CHECK_INTERVAL = int(os.getenv("ESKIMOS_UPDATE_CHECK_INTERVAL", "3600"))
+SMS_POLL_INTERVAL = int(os.getenv("ESKIMOS_SMS_POLL_INTERVAL", "15"))
+INCOMING_SMS_INTERVAL = int(os.getenv("ESKIMOS_INCOMING_SMS_INTERVAL", "60"))
 
 # Auto-update
 AUTO_UPDATE_ENABLED = os.getenv("ESKIMOS_AUTO_UPDATE", "true").lower() == "true"
+
+# SMS counters (runtime, reset on daemon restart)
+_sms_sent_today = 0
+_sms_sent_total = 0
 
 
 # ==================== Logging ====================
@@ -245,24 +252,24 @@ async def get_modem_status() -> dict:
 
 
 async def get_sms_metrics() -> dict:
-    """Get SMS metrics from local API."""
+    """Get SMS metrics - local counters + pending from PHP API."""
+    pending = 0
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "http://localhost:8000/api/sms/stats",
-                timeout=5.0
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    "sms_sent_today": data.get("sent_today", 0),
-                    "sms_sent_total": data.get("sent_total", 0),
-                    "sms_pending": data.get("pending", 0),
-                }
+        if HAS_HTTPX:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{ESKIMOS_PHP_API}/health.php")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    queue = data.get("queue", {})
+                    pending = queue.get("sms_pending", 0) or 0
     except Exception:
         pass
 
-    return {"sms_sent_today": 0, "sms_sent_total": 0, "sms_pending": 0}
+    return {
+        "sms_sent_today": _sms_sent_today,
+        "sms_sent_total": _sms_sent_total,
+        "sms_pending": pending,
+    }
 
 
 # ==================== Heartbeat ====================
@@ -604,6 +611,153 @@ async def run_diagnostic() -> dict:
     }
 
 
+# ==================== SMS Queue Polling ====================
+
+_sms_modem = None  # Reusable modem adapter instance
+
+
+async def _get_modem_adapter():
+    """Get or create a connected JsonRpcModemAdapter."""
+    global _sms_modem
+    if _sms_modem and _sms_modem._connected:
+        return _sms_modem
+
+    try:
+        from eskimos.adapters.modem.jsonrpc import JsonRpcModemAdapter, JsonRpcConfig
+        config = JsonRpcConfig(
+            phone_number=MODEM_PHONE,
+            host=MODEM_HOST,
+            port=MODEM_PORT,
+        )
+        adapter = JsonRpcModemAdapter(config)
+        await adapter.connect()
+        _sms_modem = adapter
+        return adapter
+    except Exception as e:
+        log(f"Modem connect error: {e}")
+        _sms_modem = None
+        return None
+
+
+async def _disconnect_modem():
+    """Disconnect modem adapter."""
+    global _sms_modem
+    if _sms_modem:
+        try:
+            await _sms_modem.disconnect()
+        except Exception:
+            pass
+        _sms_modem = None
+
+
+async def poll_and_send_sms() -> bool:
+    """Poll SMS queue from PHP API and send via modem.
+
+    Returns True if an SMS was sent, False otherwise.
+    """
+    global _sms_sent_today, _sms_sent_total
+    if not HAS_HTTPX:
+        return False
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Check for pending SMS
+            resp = await client.get(
+                f"{ESKIMOS_PHP_API}/get-sms.php",
+                params={"from": MODEM_PHONE},
+            )
+
+            if resp.status_code != 200:
+                log(f"SMS poll: API returned {resp.status_code}")
+                return False
+
+            data = resp.json()
+            if not data or not isinstance(data, list) or not data[0].get("isset"):
+                return False  # No pending SMS - silent
+
+            sms = data[0]
+            sms_key = sms.get("sms_key")
+            sms_to = sms.get("sms_to")
+            sms_message = sms.get("sms_message")
+
+            if not sms_key or not sms_to or not sms_message:
+                log(f"SMS poll: incomplete data - key={sms_key}")
+                return False
+
+            log(f"SMS queued: to={sms_to}, key={sms_key[:12]}..., len={len(sms_message)}")
+
+            # Connect to modem and send
+            adapter = await _get_modem_adapter()
+            if not adapter:
+                log("SMS send FAILED: cannot connect to modem")
+                return False
+
+            result = await adapter.send_sms(sms_to, sms_message)
+
+            if result.success:
+                # Report success to PHP API
+                await client.post(
+                    f"{ESKIMOS_PHP_API}/update-sms.php",
+                    json={
+                        "SMS_KEY": sms_key,
+                        "SMS_FROM": MODEM_PHONE,
+                        "SMS_IS_REPLY": sms.get("sms_is_reply", 0),
+                    },
+                )
+                _sms_sent_today += 1
+                _sms_sent_total += 1
+                log(f"SMS SENT: to={sms_to}, key={sms_key[:12]}... (today: {_sms_sent_today})")
+                return True
+            else:
+                log(f"SMS send FAILED: {result.error}")
+                return False
+
+    except Exception as e:
+        log(f"SMS poll error: {e}")
+        return False
+
+
+async def poll_incoming_sms() -> int:
+    """Check modem for incoming SMS and forward to PHP API.
+
+    Returns number of messages received.
+    """
+    if not HAS_HTTPX:
+        return 0
+
+    adapter = await _get_modem_adapter()
+    if not adapter:
+        return 0
+
+    try:
+        messages = await adapter.receive_sms()
+        if not messages:
+            return 0
+
+        count = 0
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for msg in messages:
+                try:
+                    await client.post(
+                        f"{ESKIMOS_PHP_API}/receive-sms.php",
+                        json={
+                            "sms_message": msg.content,
+                            "sms_from": msg.sender,
+                            "sms_to": MODEM_PHONE,
+                        },
+                    )
+                    count += 1
+                    log(f"SMS RECEIVED: from={msg.sender}, len={len(msg.content)}")
+                except Exception as e:
+                    log(f"Incoming SMS forward error: {e}")
+
+        return count
+
+    except Exception as e:
+        log(f"Incoming SMS poll error: {e}")
+        return 0
+
+
 # ==================== Shutdown ====================
 
 _shutdown_requested = False
@@ -642,6 +796,12 @@ async def daemon_loop():
     last_heartbeat = 0
     last_command_poll = 0
     last_update_check = 0
+    last_sms_poll = 0
+    last_incoming_poll = 0
+
+    log(f"SMS polling: {SMS_POLL_INTERVAL}s, Incoming SMS: {INCOMING_SMS_INTERVAL}s")
+    log(f"PHP API: {ESKIMOS_PHP_API}")
+    log(f"Modem: {MODEM_HOST}:{MODEM_PORT}, phone: {MODEM_PHONE}")
 
     try:
         while not _shutdown_requested:
@@ -664,6 +824,22 @@ async def daemon_loop():
                     await execute_command(client_key, cmd)
                 last_command_poll = now
 
+            # SMS queue polling (send outgoing)
+            if now - last_sms_poll >= SMS_POLL_INTERVAL:
+                try:
+                    await poll_and_send_sms()
+                except Exception as e:
+                    log(f"SMS poll loop error: {e}")
+                last_sms_poll = now
+
+            # Incoming SMS polling (receive)
+            if now - last_incoming_poll >= INCOMING_SMS_INTERVAL:
+                try:
+                    await poll_incoming_sms()
+                except Exception as e:
+                    log(f"Incoming SMS loop error: {e}")
+                last_incoming_poll = now
+
             # Periodic update check (background)
             if AUTO_UPDATE_ENABLED and now - last_update_check >= UPDATE_CHECK_INTERVAL:
                 try:
@@ -680,7 +856,9 @@ async def daemon_loop():
             await asyncio.sleep(5)
 
     finally:
-        # Cleanup
+        # Cleanup modem connection
+        await _disconnect_modem()
+        # Cleanup PID file
         if PID_FILE.exists():
             PID_FILE.unlink()
         log("Daemon stopped")
