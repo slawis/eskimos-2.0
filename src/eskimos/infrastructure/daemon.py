@@ -631,7 +631,7 @@ async def run_diagnostic() -> dict:
                                                 "id": "2"}, headers=hdrs)
                     contacts = resp.json()
                     incoming_test["contacts_raw"] = str(contacts)
-                    # Also get content list for first contact
+                    # Also get content list for first contact + test delete
                     clist = (contacts.get("result") or {}).get("SMSContactList") or []
                     if clist:
                         cid = clist[0].get("ContactId")
@@ -640,7 +640,32 @@ async def run_diagnostic() -> dict:
                                                   json={"jsonrpc": "2.0", "method": "GetSMSContentList",
                                                         "params": {"ContactId": cid, "Page": 0},
                                                         "id": "3"}, headers=hdrs)
-                            incoming_test["content_raw"] = str(resp.json())
+                            content = resp.json()
+                            incoming_test["content_raw"] = str(content)
+                            # Try different delete methods
+                            sms_items = (content.get("result") or {}).get("SMSContentList") or []
+                            if sms_items:
+                                first_sms_id = sms_items[0].get("SMSId")
+                                # Method 1: DeleteSMS by SMSId
+                                r1 = await hc.post(f"{base_url}/jrd/webapi",
+                                    json={"jsonrpc": "2.0", "method": "DeleteSMS",
+                                          "params": {"SMSId": first_sms_id}, "id": "d1"}, headers=hdrs)
+                                incoming_test["delete_by_smsid"] = str(r1.json())
+                                # Method 2: DeleteSMS by ContactId
+                                r2 = await hc.post(f"{base_url}/jrd/webapi",
+                                    json={"jsonrpc": "2.0", "method": "DeleteSMS",
+                                          "params": {"ContactId": cid}, "id": "d2"}, headers=hdrs)
+                                incoming_test["delete_by_contactid"] = str(r2.json())
+                                # Method 3: DeleteSMS with Flag
+                                r3 = await hc.post(f"{base_url}/jrd/webapi",
+                                    json={"jsonrpc": "2.0", "method": "DeleteSMS",
+                                          "params": {"SMSId": first_sms_id, "Flag": 0}, "id": "d3"}, headers=hdrs)
+                                incoming_test["delete_with_flag"] = str(r3.json())
+                                # Re-check contacts after delete attempts
+                                resp = await hc.post(f"{base_url}/jrd/webapi",
+                                    json={"jsonrpc": "2.0", "method": "GetSMSContactList",
+                                          "params": {"Page": 0, "ContactNum": 100}, "id": "d4"}, headers=hdrs)
+                                incoming_test["contacts_after_delete"] = str(resp.json())
                     # Logout
                     try:
                         await hc.post(f"{base_url}/jrd/webapi",
