@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from eskimos import __version__
-from eskimos.api.routes import health, sms, modems, updates, dashboard
+from eskimos.api.routes import health, sms, modems, updates, dashboard, campaigns, contacts
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,8 @@ def create_app() -> FastAPI:
     app.include_router(sms.router, prefix="/api/sms", tags=["SMS"])
     app.include_router(modems.router, prefix="/api/modems", tags=["Modems"])
     app.include_router(updates.router, prefix="/api/update", tags=["Updates"])
+    app.include_router(campaigns.router, prefix="/api/campaigns", tags=["Campaigns"])
+    app.include_router(contacts.router, prefix="/api/contacts", tags=["Contacts"])
 
     # Include dashboard routes (HTML)
     app.include_router(dashboard.router, tags=["Dashboard"])
