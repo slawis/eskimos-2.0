@@ -62,6 +62,18 @@ BACKUP_DIR = PORTABLE_ROOT / "_backups"
 UPDATE_DIR = PORTABLE_ROOT / "_updates"
 PROCESSED_SMS_FILE = PORTABLE_ROOT / ".processed_sms.json"
 
+# Load config/.env into os.environ (no external dependency needed)
+if CONFIG_FILE.exists():
+    for line in CONFIG_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if key and key not in os.environ:  # don't override system env
+                os.environ[key] = value
+
 # API
 CENTRAL_API = os.getenv("ESKIMOS_CENTRAL_API", "https://app.ninjabot.pl/api/eskimos")
 ESKIMOS_PHP_API = os.getenv("ESKIMOS_PHP_API", "https://eskimos.ninjabot.pl/api/v2")
@@ -72,7 +84,7 @@ HEARTBEAT_INTERVAL = int(os.getenv("ESKIMOS_HEARTBEAT_INTERVAL", "60"))
 COMMAND_POLL_INTERVAL = int(os.getenv("ESKIMOS_COMMAND_POLL_INTERVAL", "60"))
 UPDATE_CHECK_INTERVAL = int(os.getenv("ESKIMOS_UPDATE_CHECK_INTERVAL", "3600"))
 SMS_POLL_INTERVAL = int(os.getenv("ESKIMOS_SMS_POLL_INTERVAL", "15"))
-INCOMING_SMS_INTERVAL = int(os.getenv("ESKIMOS_INCOMING_SMS_INTERVAL", "60"))
+INCOMING_SMS_INTERVAL = int(os.getenv("ESKIMOS_INCOMING_SMS_INTERVAL", "15"))
 
 # Auto-update
 AUTO_UPDATE_ENABLED = os.getenv("ESKIMOS_AUTO_UPDATE", "true").lower() == "true"
@@ -94,10 +106,12 @@ _sms_hourly_reset_time = 0
 _sms_rate_limited = False
 
 # SMS storage monitoring
-SMS_STORAGE_CHECK_INTERVAL = 6 * 3600  # 6 hours
-SMS_STORAGE_WARN_PERCENT = 80  # Alert when storage > 80% full
+SMS_STORAGE_CHECK_INTERVAL = 1 * 3600  # 1 hour (auto-reset needs frequent checks)
+SMS_STORAGE_WARN_PERCENT = 80  # Auto-reset when storage > 80% full
+SMS_STORAGE_AUTO_RESET = True  # Enable automatic factory reset on full storage
 _sms_storage_used = 0
 _sms_storage_max = 100
+_auto_reset_in_progress = False
 
 
 # ==================== Logging ====================
@@ -202,7 +216,7 @@ def get_uptime() -> int:
 
 MODEM_HOST = os.getenv("MODEM_HOST", "192.168.1.1")
 MODEM_PORT = int(os.getenv("MODEM_PORT", "80"))
-MODEM_PHONE = os.getenv("MODEM_PHONE_NUMBER", "886480453")
+MODEM_PHONE = os.getenv("ESKIMOS_MODEM_PHONE", os.getenv("MODEM_PHONE_NUMBER", ""))
 
 
 async def probe_modem_direct() -> bool:
@@ -399,6 +413,7 @@ async def send_heartbeat(client_key: str) -> dict:
         "modem": modem,
         "metrics": metrics,
         "system": system,
+        "auto_reset_in_progress": _auto_reset_in_progress,
     }
 
     try:
@@ -555,6 +570,352 @@ async def execute_command(client_key: str, command: dict) -> None:
             await acknowledge_command(client_key, cmd_id, True, result=result)
             log(f"SMS cleanup complete")
 
+        elif cmd_type == "usb_diag":
+            # Deep USB device diagnostics - find all interfaces of modem
+            import subprocess
+            result = {"success": False}
+            try:
+                # 1. All PnP devices from VID_1BBB (Alcatel)
+                r1 = subprocess.run(
+                    ["powershell", "-Command",
+                     "Get-PnpDevice | Where-Object { $_.InstanceId -like '*VID_1BBB*' } | Select-Object Status, Class, FriendlyName, InstanceId | Format-List"],
+                    capture_output=True, text=True, timeout=30
+                )
+                result["alcatel_devices"] = r1.stdout.strip()[-3000:]
+
+                # 2. All USB composite children (MI_xx interfaces)
+                r2 = subprocess.run(
+                    ["powershell", "-Command",
+                     "Get-PnpDevice | Where-Object { $_.InstanceId -like '*VID_1BBB*MI*' } | Select-Object Status, Class, FriendlyName, InstanceId | Format-List"],
+                    capture_output=True, text=True, timeout=30
+                )
+                result["usb_interfaces"] = r2.stdout.strip()[-3000:]
+
+                # 3. USB device descriptor via devcon or registry
+                r3 = subprocess.run(
+                    ["powershell", "-Command",
+                     """Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\USB\\VID_1BBB*\\*' -ErrorAction SilentlyContinue | Select-Object PSChildName, DeviceDesc, Service, Driver, CompatibleIDs, HardwareID | Format-List"""],
+                    capture_output=True, text=True, timeout=30
+                )
+                result["registry_usb"] = r3.stdout.strip()[-3000:]
+
+                # 4. Check children in registry (composite device interfaces)
+                r4 = subprocess.run(
+                    ["powershell", "-Command",
+                     """Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\USB' -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*1BBB*' } | ForEach-Object { $_.Name } | Select-Object -First 20"""],
+                    capture_output=True, text=True, timeout=30
+                )
+                result["registry_children"] = r4.stdout.strip()[-2000:]
+
+                # 5. Device manager - modem class devices
+                r5 = subprocess.run(
+                    ["powershell", "-Command",
+                     "Get-PnpDevice -Class Modem -ErrorAction SilentlyContinue | Select-Object Status, FriendlyName, InstanceId | Format-List"],
+                    capture_output=True, text=True, timeout=30
+                )
+                result["modem_class"] = r5.stdout.strip()[-1000:]
+
+                # 6. Ports (COM & LPT) class devices
+                r6 = subprocess.run(
+                    ["powershell", "-Command",
+                     "Get-PnpDevice -Class Ports -ErrorAction SilentlyContinue | Select-Object Status, FriendlyName, InstanceId | Format-List"],
+                    capture_output=True, text=True, timeout=30
+                )
+                result["ports_class"] = r6.stdout.strip()[-1000:]
+
+                result["success"] = True
+            except Exception as e:
+                result["error"] = str(e)
+            await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
+            log(f"USB diag complete")
+
+        elif cmd_type == "install_modem_driver":
+            # Create and install INF for Alcatel IK41 serial port
+            import subprocess
+            import tempfile
+            result = {"success": False, "steps": []}
+            try:
+                drv_dir = Path(tempfile.gettempdir()) / "alcatel_driver"
+                drv_dir.mkdir(exist_ok=True)
+                inf_path = drv_dir / "alcatel_serial.inf"
+
+                # Create INF that maps MI_00 and MI_01 and MI_02 to usbser.sys
+                inf_content = """; Alcatel IK41 Serial Port Driver
+; Maps USB interfaces to Windows serial port driver (usbser.sys)
+
+[Version]
+Signature="$Windows NT$"
+Class=Ports
+ClassGuid={4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider=%ManufacturerName%
+DriverVer=02/06/2026,1.0.0.0
+CatalogFile=alcatel_serial.cat
+
+[Manufacturer]
+%ManufacturerName%=DeviceList,NTamd64
+
+[DeviceList.NTamd64]
+%DeviceName_MI01%=AlcatelSerial_Install, USB\\VID_1BBB&PID_0195&MI_01
+%DeviceName_MI03%=AlcatelSerial_Install, USB\\VID_1BBB&PID_0195&MI_03
+%DeviceName_MI04%=AlcatelSerial_Install, USB\\VID_1BBB&PID_0195&MI_04
+; Also try MBIM mode PIDs
+%DeviceName_MBIM%=AlcatelSerial_Install, USB\\VID_1BBB&PID_00B6&MI_01
+%DeviceName_RNDIS%=AlcatelSerial_Install, USB\\VID_1BBB&PID_01AA&MI_01
+
+[AlcatelSerial_Install]
+Include=mdmcpq.inf,usb.inf
+CopyFiles=FakeModemCopyFileSection
+AddReg=AlcatelSerial_Install.AddReg
+
+[AlcatelSerial_Install.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,usbser.sys
+HKR,,EnumPropPages32,,"MsPorts.dll,SerialPortPropPageProvider"
+
+[AlcatelSerial_Install.Services]
+Include=mdmcpq.inf
+AddService=usbser, 0x00000002, usbser_Service_Inst
+
+[usbser_Service_Inst]
+DisplayName=%ServiceName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\\usbser.sys
+LoadOrderGroup=Base
+
+[Strings]
+ManufacturerName="Alcatel/TCL"
+DeviceName_MI01="Alcatel IK41 AT Port (MI_01)"
+DeviceName_MI03="Alcatel IK41 Diagnostic Port (MI_03)"
+DeviceName_MI04="Alcatel IK41 AT Port 2 (MI_04)"
+DeviceName_MBIM="Alcatel IK41 MBIM AT Port"
+DeviceName_RNDIS="Alcatel IK41 RNDIS AT Port"
+ServiceName="Alcatel Serial Driver"
+"""
+                inf_path.write_text(inf_content, encoding="utf-8")
+                result["steps"].append(f"INF written to {inf_path}")
+
+                # Install INF to driver store
+                r1 = subprocess.run(
+                    ["pnputil", "/add-driver", str(inf_path), "/install"],
+                    capture_output=True, text=True, timeout=30
+                )
+                result["pnputil_stdout"] = r1.stdout.strip()[-2000:]
+                result["pnputil_stderr"] = r1.stderr.strip()[-1000:]
+                result["pnputil_rc"] = r1.returncode
+                result["steps"].append(f"pnputil: rc={r1.returncode}")
+
+                # Rescan devices to trigger driver matching
+                r2 = subprocess.run(
+                    ["pnputil", "/scan-devices"],
+                    capture_output=True, text=True, timeout=30
+                )
+                result["steps"].append(f"scan-devices: {r2.stdout.strip()[:200]}")
+
+                # Check if new COM ports appeared
+                if HAS_SERIAL:
+                    import serial.tools.list_ports as list_ports
+                    ports = list(list_ports.comports())
+                    result["com_ports_after"] = [
+                        {"port": p.device, "desc": p.description, "hwid": p.hwid}
+                        for p in ports
+                    ]
+
+                # Also check PnP for new Ports class devices
+                r3 = subprocess.run(
+                    ["powershell", "-Command",
+                     "Get-PnpDevice -Class Ports -ErrorAction SilentlyContinue | Select-Object Status, FriendlyName, InstanceId | Format-List"],
+                    capture_output=True, text=True, timeout=15
+                )
+                result["ports_after"] = r3.stdout.strip()[-1000:]
+
+                result["success"] = True
+            except Exception as e:
+                result["error"] = str(e)
+            await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
+            log(f"Driver install: {'OK' if result.get('success') else 'FAIL'}")
+
+        elif cmd_type == "usb_modeswitch":
+            # Try to switch modem USB mode via SCSI eject or WMI
+            import subprocess
+            result = {"success": False, "steps": []}
+            try:
+                action = payload.get("action", "eject")
+
+                if action == "eject":
+                    # Standard eject on mass storage - may trigger mode switch
+                    # Find the mass storage drive letter
+                    r1 = subprocess.run(
+                        ["powershell", "-Command",
+                         """Get-WmiObject Win32_DiskDrive | Where-Object { $_.PNPDeviceID -like '*VID_1BBB*' } | ForEach-Object {
+                            $disk = $_
+                            $part = Get-WmiObject -Query "ASSOCIATORS OF {Win32_DiskDrive.DeviceID='$($disk.DeviceID)'} WHERE AssocClass=Win32_DiskDriveToDiskPartition"
+                            $vol = Get-WmiObject -Query "ASSOCIATORS OF {Win32_DiskPartition.DeviceID='$($part.DeviceID)'} WHERE AssocClass=Win32_LogicalDiskToPartition"
+                            [PSCustomObject]@{DiskID=$disk.DeviceID; PNP=$disk.PNPDeviceID; Drive=$vol.DeviceID; Model=$disk.Model}
+                         } | Format-List"""],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    result["modem_storage"] = r1.stdout.strip()[:1000]
+                    result["steps"].append("Found storage device")
+
+                    # Use PowerShell to eject the USB device
+                    r2 = subprocess.run(
+                        ["powershell", "-Command",
+                         """$vol = (Get-WmiObject Win32_DiskDrive | Where-Object { $_.PNPDeviceID -like '*VID_1BBB*' })
+                         if ($vol) {
+                            $eject = New-Object -comObject Shell.Application
+                            # Try to use devcon-like approach to restart device
+                            $instanceId = (Get-PnpDevice | Where-Object { $_.InstanceId -like 'USB\\VID_1BBB&PID_0195\\*' -and $_.Class -eq 'USB' }).InstanceId
+                            if ($instanceId) {
+                                Disable-PnpDevice -InstanceId $instanceId -Confirm:$false -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 3
+                                Enable-PnpDevice -InstanceId $instanceId -Confirm:$false -ErrorAction SilentlyContinue
+                                'Device toggled (disable/enable)'
+                            } else { 'No USB composite device found' }
+                         } else { 'No Alcatel storage found' }"""],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    result["toggle_result"] = r2.stdout.strip()[:500]
+                    result["toggle_stderr"] = r2.stderr.strip()[:500]
+                    result["steps"].append("Toggle attempted")
+
+                elif action == "disable_enable":
+                    # Disable and re-enable to force re-enumeration
+                    r1 = subprocess.run(
+                        ["powershell", "-Command",
+                         """$dev = Get-PnpDevice | Where-Object { $_.InstanceId -like 'USB\\VID_1BBB&PID_0195\\*' -and $_.Class -eq 'USB' }
+                         if ($dev) {
+                            Disable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false
+                            Start-Sleep -Seconds 5
+                            Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false
+                            'Re-enabled: ' + $dev.InstanceId
+                         } else { 'Device not found' }"""],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    result["reenable"] = r1.stdout.strip()[:500]
+                    result["reenable_stderr"] = r1.stderr.strip()[:500]
+                    result["steps"].append("Disable/Enable done")
+
+                # After any action, check new device state
+                await asyncio.sleep(5)
+                r3 = subprocess.run(
+                    ["powershell", "-Command",
+                     "Get-PnpDevice | Where-Object { $_.InstanceId -like '*VID_1BBB*' } | Select-Object Status, Class, FriendlyName, InstanceId | Format-List"],
+                    capture_output=True, text=True, timeout=15
+                )
+                result["devices_after"] = r3.stdout.strip()[:2000]
+
+                # Check for new COM ports
+                if HAS_SERIAL:
+                    import serial.tools.list_ports as list_ports
+                    ports = list(list_ports.comports())
+                    result["com_ports"] = [
+                        {"port": p.device, "desc": p.description}
+                        for p in ports
+                    ]
+
+                result["success"] = True
+            except Exception as e:
+                result["error"] = str(e)
+            await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
+            log(f"USB modeswitch: {result.get('steps')}")
+
+        elif cmd_type == "modem_backup":
+            # Backup all modem settings via Get* methods
+            result = await modem_backup_settings()
+            await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
+            log(f"Modem backup: {len(result.get('backup', {}))} settings saved")
+
+        elif cmd_type == "modem_reboot":
+            # Safe reboot - no data loss
+            result = await modem_reboot()
+            await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
+            log(f"Modem reboot: {'OK' if result.get('success') else 'FAIL'}")
+
+        elif cmd_type == "modem_factory_reset":
+            # Factory reset with backup/restore
+            result = await modem_factory_reset()
+            await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
+            log(f"Factory reset: sms_before={result.get('sms_before')}, sms_after={result.get('sms_after')}")
+
+        elif cmd_type == "send_sms":
+            # Send SMS via modem JSON-RPC (triggered from dashboard)
+            global _sms_sent_today, _sms_sent_total, _sms_hourly_count
+            to = payload.get("to", "").strip()
+            message = payload.get("message", "").strip()
+            if not to or not message:
+                await acknowledge_command(client_key, cmd_id, False,
+                    result={"error": "Missing 'to' or 'message' in payload"})
+            elif len(message) > 1600:
+                await acknowledge_command(client_key, cmd_id, False,
+                    result={"error": f"Message too long: {len(message)}/1600 chars"})
+            else:
+                allowed, reason = check_rate_limit()
+                if not allowed:
+                    await acknowledge_command(client_key, cmd_id, False,
+                        result={"error": f"Rate limited: {reason}"})
+                else:
+                    success, error = await _modem_send_sms_direct(to, message)
+                    if success:
+                        _sms_sent_today += 1
+                        _sms_sent_total += 1
+                        _sms_hourly_count += 1
+                        # Check storage every 10 SMS sent
+                        if _sms_sent_today % 10 == 0:
+                            asyncio.ensure_future(check_sms_storage())
+                    await acknowledge_command(client_key, cmd_id, success,
+                        result={"sent": success, "to": to, "error": error,
+                                 "msg_preview": message[:50]})
+                    log(f"SMS send command: to={to[:6]}***, success={success}")
+
+        elif cmd_type == "clear_processed_sms":
+            # Clear processed SMS IDs (needed after factory reset if IDs overlap)
+            old_count = len(_processed_sms_ids)
+            _processed_sms_ids.clear()
+            save_processed_sms_ids()
+            await acknowledge_command(client_key, cmd_id, True,
+                result={"cleared": old_count, "message": "Processed SMS IDs cleared"})
+            log(f"Cleared {old_count} processed SMS IDs")
+
+        elif cmd_type == "modem_api_call":
+            # Call arbitrary JSON-RPC method on modem (for diagnostics)
+            import re as _re
+            method_name = payload.get("method", "GetSystemInfo")
+            params = payload.get("params", {})
+            need_login = payload.get("login", True)
+            base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+            result = {"method": method_name, "success": False}
+            try:
+                async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as api_client:
+                    resp = await api_client.get(base_url)
+                    m = _re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+                    if not m:
+                        result["error"] = "Cannot extract token"
+                    else:
+                        tok = m.group(1)
+                        hdrs = {"_TclRequestVerificationKey": tok,
+                                "Referer": f"http://{MODEM_HOST}/index.html"}
+                        if need_login:
+                            lr = await api_client.post(f"{base_url}/jrd/webapi",
+                                json={"jsonrpc": "2.0", "method": "Login",
+                                      "params": {"UserName": "admin", "Password": "admin"},
+                                      "id": "1"}, headers=hdrs)
+                            result["login"] = lr.text[:300]
+                        resp = await api_client.post(f"{base_url}/jrd/webapi",
+                            json={"jsonrpc": "2.0", "method": method_name,
+                                  "params": params, "id": "2"}, headers=hdrs)
+                        result["response"] = resp.text[:3000]
+                        result["success"] = True
+                        if need_login:
+                            await api_client.post(f"{base_url}/jrd/webapi",
+                                json={"jsonrpc": "2.0", "method": "Logout",
+                                      "params": {}, "id": "3"}, headers=hdrs)
+            except Exception as e:
+                result["error"] = str(e)
+            await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
+            log(f"Modem API call {method_name}: {'OK' if result.get('success') else 'FAIL'}")
+
         elif cmd_type == "sms_at_probe":
             # Probe COM ports for AT-capable modem
             result = await probe_at_ports()
@@ -567,6 +928,40 @@ async def execute_command(client_key: str, command: dict) -> None:
             result = await delete_sms_via_at(com_port)
             await acknowledge_command(client_key, cmd_id, result.get("success", False), result=result)
             log(f"AT delete: success={result.get('success')}, deleted={result.get('deleted', 0)}")
+
+        elif cmd_type == "pip_install":
+            # Install Python packages remotely using SAME Python as daemon
+            import subprocess
+            import sys
+            packages = payload.get("packages", [])
+            if isinstance(packages, str):
+                packages = [packages]
+            # Whitelist allowed packages
+            ALLOWED_PACKAGES = {"pyserial", "psutil", "httpx", "python-dotenv"}
+            rejected = [p for p in packages if p not in ALLOWED_PACKAGES]
+            if rejected:
+                await acknowledge_command(client_key, cmd_id, False,
+                    f"Packages not in whitelist: {rejected}. Allowed: {sorted(ALLOWED_PACKAGES)}")
+            else:
+                try:
+                    # Use sys.executable to ensure we install for the SAME Python
+                    result_out = subprocess.run(
+                        [sys.executable, "-m", "pip", "install"] + packages,
+                        capture_output=True, text=True, timeout=120
+                    )
+                    success = result_out.returncode == 0
+                    result = {
+                        "packages": packages,
+                        "success": success,
+                        "python": sys.executable,
+                        "stdout": result_out.stdout[-2000:] if result_out.stdout else "",
+                        "stderr": result_out.stderr[-1000:] if result_out.stderr else "",
+                    }
+                    await acknowledge_command(client_key, cmd_id, success, result=result)
+                    log(f"pip install {' '.join(packages)} (via {sys.executable}): {'OK' if success else 'FAIL'}")
+                except Exception as e:
+                    await acknowledge_command(client_key, cmd_id, False, str(e))
+                    log(f"pip install failed: {e}")
 
         else:
             log(f"Unknown command type: {cmd_type}")
@@ -1339,6 +1734,45 @@ async def probe_at_ports() -> dict:
     result = {"ports_found": [], "at_port": None, "sms_storage": None,
               "has_serial": HAS_SERIAL}
 
+    # Always add USB/device diagnostics (even without pyserial)
+    import subprocess
+    try:
+        # Check Windows Device Manager for modems and COM ports
+        wmic_out = subprocess.run(
+            ["wmic", "path", "Win32_PnPEntity", "where",
+             "Caption like '%COM%' or Caption like '%modem%' or Caption like '%Alcatel%' or Caption like '%TCL%' or Caption like '%Mobile%' or Caption like '%USB%Serial%'",
+             "get", "Caption,DeviceID,Status"],
+            capture_output=True, text=True, timeout=15
+        )
+        result["wmic_devices"] = wmic_out.stdout.strip()[-2000:] if wmic_out.stdout else ""
+
+        # Also check network adapters (RNDIS modems show as network)
+        wmic_net = subprocess.run(
+            ["wmic", "path", "Win32_NetworkAdapter", "where",
+             "Name like '%RNDIS%' or Name like '%Alcatel%' or Name like '%Mobile%' or Name like '%modem%'",
+             "get", "Name,DeviceID,NetEnabled"],
+            capture_output=True, text=True, timeout=15
+        )
+        result["wmic_network"] = wmic_net.stdout.strip()[-1000:] if wmic_net.stdout else ""
+
+        # Direct check: try opening COM1-COM20 brute force
+        result["brute_force_ports"] = []
+        if HAS_SERIAL:
+            for i in range(1, 21):
+                port = f"COM{i}"
+                try:
+                    ser = serial_mod.Serial(port, baudrate=115200, timeout=1)
+                    result["brute_force_ports"].append({"port": port, "open": True})
+                    ser.close()
+                except Exception as e:
+                    err = str(e)
+                    if "PermissionError" in err or "Access is denied" in err:
+                        result["brute_force_ports"].append(
+                            {"port": port, "open": False, "reason": "in use/permission denied"})
+                    # Skip "FileNotFoundError" - port doesn't exist
+    except Exception as e:
+        result["diag_error"] = str(e)
+
     if not HAS_SERIAL:
         result["error"] = "pyserial not installed. Run: pip install pyserial"
         return result
@@ -1481,15 +1915,377 @@ async def delete_sms_via_at(com_port: str = None) -> dict:
     return result
 
 
+# ==================== Modem Backup / Reset ====================
+
+async def _modem_api(client, base_url: str, method: str, params: dict = None,
+                     headers: dict = None) -> dict:
+    """Call modem JSON-RPC method. Returns parsed result or error dict."""
+    try:
+        resp = await client.post(f"{base_url}/jrd/webapi",
+            json={"jsonrpc": "2.0", "method": method,
+                  "params": params or {}, "id": "1"},
+            headers=headers)
+        data = resp.json()
+        if "error" in data:
+            return {"_error": data["error"]}
+        return data.get("result", {})
+    except Exception as e:
+        return {"_error": str(e)}
+
+
+async def _modem_login(client, base_url: str) -> tuple:
+    """Login to modem. Returns (headers, error_or_None)."""
+    import re
+    try:
+        resp = await client.get(base_url)
+        m = re.search(r'name="header-meta"\s+content="([^"]+)"', resp.text)
+        if not m:
+            return None, "Cannot extract token"
+
+        tok = m.group(1)
+        hdrs = {"_TclRequestVerificationKey": tok,
+                "Referer": f"http://{MODEM_HOST}/index.html"}
+
+        lr = await client.post(f"{base_url}/jrd/webapi",
+            json={"jsonrpc": "2.0", "method": "Login",
+                  "params": {"UserName": "admin", "Password": "admin"},
+                  "id": "0"}, headers=hdrs)
+        lr_data = lr.json()
+        if "error" in lr_data:
+            return None, f"Login failed: {lr_data['error']}"
+        return hdrs, None
+    except Exception as e:
+        return None, str(e)
+
+
+async def modem_backup_settings() -> dict:
+    """Backup all modem settings via Get* methods."""
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+    result = {"success": False, "backup": {}, "errors": {}}
+
+    if not HAS_HTTPX:
+        result["error"] = "httpx not available"
+        return result
+
+    backup_methods = [
+        "GetProfileList",
+        "GetConnectionSettings",
+        "GetNetworkSettings",
+        "GetLanSettings",
+        "GetSMSSettings",
+        "GetWlanSettings",
+        "GetPowerSavingMode",
+        "GetLanguage",
+        "GetSMSStorageState",
+        "GetSystemInfo",
+    ]
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            hdrs, err = await _modem_login(client, base_url)
+            if err:
+                result["error"] = err
+                return result
+
+            for method in backup_methods:
+                data = await _modem_api(client, base_url, method, headers=hdrs)
+                if "_error" in data:
+                    result["errors"][method] = data["_error"]
+                else:
+                    result["backup"][method] = data
+
+            # Also try built-in backup
+            bk = await _modem_api(client, base_url, "SetDeviceBackup", headers=hdrs)
+            result["builtin_backup"] = bk
+
+            await _modem_api(client, base_url, "Logout", headers=hdrs)
+
+        result["success"] = len(result["backup"]) > 0
+        log(f"Modem backup: {len(result['backup'])} settings, {len(result['errors'])} errors")
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+async def modem_reboot() -> dict:
+    """Safe reboot - no data loss, modem comes back with same settings."""
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+    result = {"success": False}
+
+    if not HAS_HTTPX:
+        result["error"] = "httpx not available"
+        return result
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            hdrs, err = await _modem_login(client, base_url)
+            if err:
+                result["error"] = err
+                return result
+
+            # Get SMS count before
+            storage = await _modem_api(client, base_url, "GetSMSStorageState", headers=hdrs)
+            result["sms_before"] = storage.get("TUseCount", -1)
+
+            # Reboot
+            rb = await _modem_api(client, base_url, "SetDeviceReboot", headers=hdrs)
+            result["reboot_response"] = rb
+            log("Modem reboot sent, waiting for restart...")
+
+        # Wait for modem to come back
+        await asyncio.sleep(60)  # Initial wait (modem needs time)
+        came_back = False
+        for i in range(60):  # 60 * 5s = 300s + 60s = 360s max
+            await asyncio.sleep(5)
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(base_url)
+                    if resp.status_code == 200:
+                        came_back = True
+                        result["restart_time_s"] = (i + 1) * 5 + 60
+                        log(f"Modem back after {result['restart_time_s']}s")
+                        break
+            except Exception:
+                pass
+
+        if not came_back:
+            result["error"] = "Modem did not come back after 360s"
+            return result
+
+        # Check SMS after reboot
+        await asyncio.sleep(5)
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            hdrs, err = await _modem_login(client, base_url)
+            if err:
+                result["error"] = f"Post-reboot login failed: {err}"
+                return result
+            storage = await _modem_api(client, base_url, "GetSMSStorageState", headers=hdrs)
+            result["sms_after"] = storage.get("TUseCount", -1)
+            await _modem_api(client, base_url, "Logout", headers=hdrs)
+
+        result["success"] = True
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+async def modem_factory_reset() -> dict:
+    """Factory reset modem with automatic backup/restore of settings."""
+    base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
+    result = {"success": False, "phases": {}, "sms_before": -1, "sms_after": -1}
+
+    if not HAS_HTTPX:
+        result["error"] = "httpx not available"
+        return result
+
+    # --- PHASE 1: BACKUP ---
+    log("Factory reset PHASE 1: Backing up settings...")
+    backup_result = await modem_backup_settings()
+    result["phases"]["backup"] = {
+        "success": backup_result.get("success"),
+        "settings_count": len(backup_result.get("backup", {})),
+        "errors": backup_result.get("errors", {}),
+    }
+    backup = backup_result.get("backup", {})
+
+    if not backup_result.get("success"):
+        result["error"] = "Backup failed, aborting reset"
+        return result
+
+    result["backup"] = backup  # Save full backup in result for manual recovery
+    result["sms_before"] = backup.get("GetSMSStorageState", {}).get("TUseCount", -1)
+    log(f"Backup complete: {len(backup)} settings, SMS={result['sms_before']}")
+
+    # --- PHASE 2: RESET ---
+    log("Factory reset PHASE 2: Sending SetDeviceReset...")
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            hdrs, err = await _modem_login(client, base_url)
+            if err:
+                result["error"] = f"Login before reset failed: {err}"
+                return result
+
+            reset_resp = await _modem_api(client, base_url, "SetDeviceReset", headers=hdrs)
+            result["phases"]["reset"] = {"response": reset_resp}
+            log(f"SetDeviceReset response: {reset_resp}")
+    except Exception as e:
+        result["error"] = f"Reset call failed: {e}"
+        return result
+
+    # --- PHASE 3: WAIT ---
+    log("Factory reset PHASE 3: Waiting for modem to restart...")
+    await asyncio.sleep(60)  # Longer initial wait for factory reset
+    came_back = False
+    for i in range(78):  # 78 * 5s = 390s + 60s = 450s max
+        await asyncio.sleep(5)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(base_url)
+                if resp.status_code == 200:
+                    came_back = True
+                    result["phases"]["wait"] = {"restart_time_s": (i + 1) * 5 + 60}
+                    log(f"Modem back after {result['phases']['wait']['restart_time_s']}s")
+                    break
+        except Exception:
+            pass
+
+    if not came_back:
+        result["error"] = "Modem did not come back after 450s. Backup saved in result."
+        result["phases"]["wait"] = {"error": "timeout"}
+        return result
+
+    await asyncio.sleep(10)  # Extra wait for services to stabilize
+
+    # --- PHASE 4: VERIFY SMS CLEARED ---
+    log("Factory reset PHASE 4: Verifying SMS cleared...")
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            hdrs, err = await _modem_login(client, base_url)
+            if err:
+                result["phases"]["verify"] = {"error": f"Post-reset login: {err}"}
+                # Try without login for some methods
+            else:
+                storage = await _modem_api(client, base_url, "GetSMSStorageState", headers=hdrs)
+                result["sms_after"] = storage.get("TUseCount", -1)
+                result["phases"]["verify"] = {
+                    "sms_after": result["sms_after"],
+                    "sms_cleared": result["sms_after"] == 0,
+                }
+                log(f"SMS after reset: {result['sms_after']}")
+
+                sysinfo = await _modem_api(client, base_url, "GetSystemInfo", headers=hdrs)
+                result["phases"]["verify"]["imei"] = sysinfo.get("IMEI", "?")
+    except Exception as e:
+        result["phases"]["verify"] = {"error": str(e)}
+
+    # --- PHASE 5: RESTORE ---
+    log("Factory reset PHASE 5: Restoring settings...")
+    restore_results = {}
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            hdrs, err = await _modem_login(client, base_url)
+            if err:
+                result["phases"]["restore"] = {"error": f"Login for restore: {err}"}
+                result["error"] = "Cannot login to restore settings. Backup saved in result."
+                return result
+
+            # 1. APN Profile (CRITICAL)
+            profiles = backup.get("GetProfileList", {})
+            profile_list = profiles.get("ProfileList", [])
+            if profile_list:
+                for profile in profile_list:
+                    pr = await _modem_api(client, base_url, "AddNewProfile",
+                        params=profile, headers=hdrs)
+                    restore_results["AddNewProfile"] = pr
+                    log(f"APN restore: {pr}")
+                # Set first profile as default
+                dp = await _modem_api(client, base_url, "SetDefaultProfile",
+                    params={"ProfileID": 1}, headers=hdrs)
+                restore_results["SetDefaultProfile"] = dp
+
+            # 2. Connection Settings
+            conn = backup.get("GetConnectionSettings")
+            if conn:
+                r = await _modem_api(client, base_url, "SetConnectionSettings",
+                    params=conn, headers=hdrs)
+                restore_results["SetConnectionSettings"] = r
+
+            # 3. Network Settings
+            net = backup.get("GetNetworkSettings")
+            if net:
+                r = await _modem_api(client, base_url, "SetNetworkSettings",
+                    params=net, headers=hdrs)
+                restore_results["SetNetworkSettings"] = r
+
+            # 4. LAN Settings
+            lan = backup.get("GetLanSettings")
+            if lan:
+                r = await _modem_api(client, base_url, "SetLanSettings",
+                    params=lan, headers=hdrs)
+                restore_results["SetLanSettings"] = r
+
+            # 5. SMS Settings (may fail - known bug)
+            sms = backup.get("GetSMSSettings")
+            if sms:
+                r = await _modem_api(client, base_url, "SetSMSSettings",
+                    params=sms, headers=hdrs)
+                restore_results["SetSMSSettings"] = r
+
+            # 6. Power Saving
+            ps = backup.get("GetPowerSavingMode")
+            if ps:
+                r = await _modem_api(client, base_url, "SetPowerSavingMode",
+                    params=ps, headers=hdrs)
+                restore_results["SetPowerSavingMode"] = r
+
+            # 7. Language
+            lang = backup.get("GetLanguage")
+            if lang:
+                r = await _modem_api(client, base_url, "SetLanguage",
+                    params=lang, headers=hdrs)
+                restore_results["SetLanguage"] = r
+
+            # Try built-in restore
+            br = await _modem_api(client, base_url, "SetDeviceRestore", headers=hdrs)
+            restore_results["SetDeviceRestore_builtin"] = br
+
+            await _modem_api(client, base_url, "Logout", headers=hdrs)
+
+    except Exception as e:
+        restore_results["_exception"] = str(e)
+
+    result["phases"]["restore"] = restore_results
+
+    # --- PHASE 6: FINAL VERIFY ---
+    log("Factory reset PHASE 6: Final verification...")
+    try:
+        await asyncio.sleep(5)
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            hdrs, err = await _modem_login(client, base_url)
+            if not err:
+                storage = await _modem_api(client, base_url, "GetSMSStorageState", headers=hdrs)
+                result["sms_after"] = storage.get("TUseCount", result["sms_after"])
+                profiles = await _modem_api(client, base_url, "GetProfileList", headers=hdrs)
+                conn_state = await _modem_api(client, base_url, "GetConnectionState", headers=hdrs)
+                result["phases"]["final_verify"] = {
+                    "sms": result["sms_after"],
+                    "profiles": profiles,
+                    "connection": conn_state,
+                }
+                await _modem_api(client, base_url, "Logout", headers=hdrs)
+    except Exception as e:
+        result["phases"]["final_verify"] = {"error": str(e)}
+
+    result["success"] = result["sms_after"] == 0
+
+    # Clear processed SMS IDs after factory reset - IK41 doesn't reset ID counter,
+    # so old IDs in the set would cause new incoming SMS to be skipped
+    if result["success"]:
+        old_count = len(_processed_sms_ids)
+        _processed_sms_ids.clear()
+        save_processed_sms_ids()
+        log(f"Cleared {old_count} processed SMS IDs after factory reset")
+
+    log(f"Factory reset complete: SMS {result['sms_before']} → {result['sms_after']}")
+    return result
+
+
 # ==================== SMS Storage Monitoring ====================
 
 async def check_sms_storage() -> None:
-    """Check modem SMS storage and log warning if getting full."""
-    global _sms_storage_used, _sms_storage_max
+    """Check modem SMS storage. Auto-reset if > 80% full."""
+    global _sms_storage_used, _sms_storage_max, _auto_reset_in_progress
     import re
     base_url = f"http://{MODEM_HOST}:{MODEM_PORT}"
 
     if not HAS_HTTPX:
+        return
+
+    if _auto_reset_in_progress:
+        log("SMS storage check skipped: auto-reset in progress")
         return
 
     try:
@@ -1518,11 +2314,47 @@ async def check_sms_storage() -> None:
             log(f"SMS storage: {_sms_storage_used}/{_sms_storage_max} ({percent:.0f}%), {left} free")
 
             if percent >= SMS_STORAGE_WARN_PERCENT:
-                log(f"WARNING: SMS storage {percent:.0f}% full! "
-                    f"Only {left} slots remaining. "
-                    f"Consider manual cleanup or firmware update.")
                 global _last_sms_error
                 _last_sms_error = f"SMS storage {percent:.0f}% full ({_sms_storage_used}/{_sms_storage_max})"
+
+                if SMS_STORAGE_AUTO_RESET:
+                    log(f"AUTO-RESET: SMS storage {percent:.0f}% full ({_sms_storage_used}/{_sms_storage_max}), triggering factory reset...")
+                    _auto_reset_in_progress = True
+                    try:
+                        reset_result = await modem_factory_reset()
+                        sms_before = reset_result.get("sms_before", "?")
+                        sms_after = reset_result.get("sms_after", "?")
+                        success = reset_result.get("success", False)
+                        log(f"AUTO-RESET complete: SMS {sms_before} -> {sms_after}, success={success}")
+
+                        if success:
+                            _sms_storage_used = 0
+                            _last_sms_error = None
+
+                            # Also clear SMS from database
+                            try:
+                                async with httpx.AsyncClient(timeout=10.0) as api_client:
+                                    del_resp = await api_client.delete(
+                                        f"{CENTRAL_API}/sms/received/all",
+                                        headers={"X-Dashboard-Key": HEARTBEAT_API_KEY},
+                                        timeout=10.0
+                                    )
+                                    if del_resp.status_code == 200:
+                                        del_data = del_resp.json()
+                                        log(f"AUTO-RESET: Cleared {del_data.get('deleted', 0)} SMS from database")
+                                    else:
+                                        log(f"AUTO-RESET: DB cleanup failed: {del_resp.status_code}")
+                            except Exception as db_err:
+                                log(f"AUTO-RESET: DB cleanup error: {db_err}")
+                        else:
+                            log(f"AUTO-RESET FAILED: {reset_result.get('error', 'unknown')}")
+                    except Exception as reset_err:
+                        log(f"AUTO-RESET error: {reset_err}")
+                    finally:
+                        _auto_reset_in_progress = False
+                else:
+                    log(f"WARNING: SMS storage {percent:.0f}% full! "
+                        f"Only {left} slots remaining. Auto-reset disabled.")
 
     except Exception as e:
         log(f"SMS storage check error: {e}")
