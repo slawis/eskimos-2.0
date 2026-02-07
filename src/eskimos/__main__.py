@@ -43,12 +43,6 @@ def setup_bundled_environment() -> None:
 
     bundle_dir = get_bundle_dir()
 
-    # Set Chromium path for pyppeteer
-    chromium_path = bundle_dir / "chromium" / "chrome.exe"
-    if chromium_path.exists():
-        os.environ["PYPPETEER_CHROMIUM_REVISION"] = "bundled"
-        os.environ["PYPPETEER_EXECUTABLE_PATH"] = str(chromium_path)
-
     # Set templates path
     templates_path = bundle_dir / "templates"
     if templates_path.exists():

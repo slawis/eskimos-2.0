@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 MODEM_HOST = os.environ.get("MODEM_HOST", "192.168.1.1")
 MODEM_PORT = int(os.environ.get("MODEM_PORT", "80"))
 MODEM_PHONE = os.environ.get("MODEM_PHONE_NUMBER", "886480453")
-MODEM_TYPE = os.environ.get("MODEM_TYPE", "puppeteer")
+MODEM_TYPE = os.environ.get("MODEM_TYPE", "mock")
 MODEM_PROBE_TIMEOUT = float(os.environ.get("MODEM_PROBE_TIMEOUT", "5.0"))
 
 # Cache for hardware detection

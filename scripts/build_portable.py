@@ -4,7 +4,6 @@ Build Portable Eskimos Gateway Distribution
 
 Creates a self-contained .zip file that includes:
 - Embedded Python 3.11
-- Chrome for Testing
 - All dependencies pre-installed
 - Launcher scripts
 
@@ -12,7 +11,7 @@ Usage:
     python scripts/build_portable.py
 
 Output:
-    dist/EskimosGateway.zip (~200MB)
+    dist/EskimosGateway.zip (~50MB)
 """
 
 from __future__ import annotations
@@ -34,8 +33,6 @@ OUTPUT_NAME = "EskimosGateway"
 # Download URLs
 PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.11.7/python-3.11.7-embed-amd64.zip"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-# Chrome for Testing - stable version
-CHROME_URL = "https://storage.googleapis.com/chrome-for-testing-public/131.0.6778.85/win64/chrome-win64.zip"
 
 # Required packages
 PACKAGES = [
@@ -43,7 +40,6 @@ PACKAGES = [
     "uvicorn[standard]>=0.25",
     "jinja2>=3.1",
     "python-multipart>=0.0.6",
-    "pyppeteer>=2.0.0",
     "httpx>=0.25",
     "pydantic>=2.5",
     "pydantic-settings>=2.1",
@@ -135,35 +131,6 @@ def install_packages(python_dir: Path) -> None:
         )
 
 
-def setup_chrome(build_dir: Path) -> Path:
-    """Download and setup Chrome for Testing."""
-    chrome_dir = build_dir / "chromium"
-    chrome_dir.mkdir(exist_ok=True)
-
-    # Download Chrome
-    chrome_zip = build_dir / "chrome.zip"
-    if not chrome_zip.exists():
-        download_file(CHROME_URL, chrome_zip, "Chrome for Testing")
-
-    # Extract
-    extract_zip(chrome_zip, build_dir)
-
-    # Move to chromium folder (Chrome extracts to chrome-win64/)
-    chrome_extracted = build_dir / "chrome-win64"
-    if chrome_extracted.exists():
-        for item in chrome_extracted.iterdir():
-            dest = chrome_dir / item.name
-            if dest.exists():
-                if dest.is_dir():
-                    shutil.rmtree(dest)
-                else:
-                    dest.unlink()
-            shutil.move(str(item), str(chrome_dir))
-        chrome_extracted.rmdir()
-
-    return chrome_dir
-
-
 def copy_eskimos(build_dir: Path) -> None:
     """Copy eskimos source code."""
     src_dir = PROJECT_ROOT / "src" / "eskimos"
@@ -194,11 +161,9 @@ cd /d "%~dp0"
 
 :: Set paths
 set PYTHON=%~dp0python\python.exe
-set CHROMIUM=%~dp0chromium\chrome.exe
 set ESKIMOS=%~dp0eskimos
 
 :: Set environment
-set PYPPETEER_EXECUTABLE_PATH=%CHROMIUM%
 set PYTHONPATH=%ESKIMOS%
 
 echo.
@@ -221,11 +186,9 @@ cd /d "%~dp0"
 
 :: Set paths
 set PYTHON=%~dp0python\pythonw.exe
-set CHROMIUM=%~dp0chromium\chrome.exe
 set ESKIMOS=%~dp0eskimos
 
 :: Set environment
-set PYPPETEER_EXECUTABLE_PATH=%CHROMIUM%
 set PYTHONPATH=%ESKIMOS%
 
 :: Start server in background
@@ -320,11 +283,9 @@ cd /d "%~dp0"
 
 :: Set paths
 set PYTHON=%~dp0python\pythonw.exe
-set CHROMIUM=%~dp0chromium\chrome.exe
 set ESKIMOS=%~dp0eskimos
 
 :: Set environment
-set PYPPETEER_EXECUTABLE_PATH=%CHROMIUM%
 set PYTHONPATH=%ESKIMOS%
 
 echo.
@@ -356,11 +317,9 @@ cd /d "%~dp0"
 :: Set paths
 set PYTHON=%~dp0python\python.exe
 set PYTHONW=%~dp0python\pythonw.exe
-set CHROMIUM=%~dp0chromium\chrome.exe
 set ESKIMOS=%~dp0eskimos
 
 :: Set environment
-set PYPPETEER_EXECUTABLE_PATH=%CHROMIUM%
 set PYTHONPATH=%ESKIMOS%
 
 echo.
@@ -811,7 +770,6 @@ def main() -> None:
     # Setup components
     python_dir = setup_python(BUILD_DIR)
     install_packages(python_dir)
-    setup_chrome(BUILD_DIR)
     copy_eskimos(BUILD_DIR)
     create_batch_files(BUILD_DIR)
     copy_tools(BUILD_DIR)

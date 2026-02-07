@@ -40,9 +40,6 @@ dependencies = [
     # Scheduling
     "apscheduler>=3.10",
 
-    # Puppeteer (legacy modem)
-    "pyppeteer>=2.0.0",
-
     # Logging
     "structlog>=24.1",
 
@@ -52,6 +49,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+legacy = [
+    # Legacy IK41VE1 modem via browser automation (requires Chrome)
+    "pyppeteer>=2.0.0",
+]
 dev = [
     # Testing
     "pytest>=7.4",
