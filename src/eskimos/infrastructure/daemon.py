@@ -1550,6 +1550,15 @@ async def run_diagnostic() -> dict:
     modem = await get_modem_status()
     metrics = await get_sms_metrics()
     system = get_system_info()
+    # Debug: include daemon config state
+    system["modem_type"] = MODEM_TYPE
+    system["modem_phone"] = MODEM_PHONE
+    system["config_file"] = str(CONFIG_FILE)
+    system["config_exists"] = CONFIG_FILE.exists()
+    try:
+        system["config_content"] = CONFIG_FILE.read_text()[:500] if CONFIG_FILE.exists() else "NOT FOUND"
+    except Exception:
+        system["config_content"] = "READ ERROR"
 
     # Direct HTTP probe to modem (bypasses Gateway API)
     modem_debug = {}
