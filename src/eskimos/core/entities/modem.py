@@ -17,6 +17,7 @@ class ModemType(str, Enum):
 
     IK41VE1_PUPPETEER = "ik41ve1_puppeteer"  # Legacy modem via Puppeteer
     DINSTAR_HTTP = "dinstar_http"  # Dinstar UC2000 via HTTP API
+    SIM7600_SERIAL = "sim7600_serial"  # SIM7600G-H via AT commands (serial)
     MOCK = "mock"  # Mock modem for testing
 
 

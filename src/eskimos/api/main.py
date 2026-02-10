@@ -14,13 +14,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from eskimos import __version__
+from eskimos.api.auth import require_api_key
 from eskimos.api.routes import health, sms, modems, updates, dashboard, campaigns, contacts
 
 logger = logging.getLogger(__name__)
@@ -72,12 +73,16 @@ def create_app() -> FastAPI:
         app.state.templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
     # Include API routes
+    # Public (no auth)
     app.include_router(health.router, prefix="/api", tags=["Health"])
-    app.include_router(sms.router, prefix="/api/sms", tags=["SMS"])
-    app.include_router(modems.router, prefix="/api/modems", tags=["Modems"])
-    app.include_router(updates.router, prefix="/api/update", tags=["Updates"])
-    app.include_router(campaigns.router, prefix="/api/campaigns", tags=["Campaigns"])
-    app.include_router(contacts.router, prefix="/api/contacts", tags=["Contacts"])
+
+    # Protected (require X-API-Key header)
+    api_deps = [Depends(require_api_key)]
+    app.include_router(sms.router, prefix="/api/sms", tags=["SMS"], dependencies=api_deps)
+    app.include_router(modems.router, prefix="/api/modems", tags=["Modems"], dependencies=api_deps)
+    app.include_router(updates.router, prefix="/api/update", tags=["Updates"], dependencies=api_deps)
+    app.include_router(campaigns.router, prefix="/api/campaigns", tags=["Campaigns"], dependencies=api_deps)
+    app.include_router(contacts.router, prefix="/api/contacts", tags=["Contacts"], dependencies=api_deps)
 
     # Include dashboard routes (HTML)
     app.include_router(dashboard.router, tags=["Dashboard"])

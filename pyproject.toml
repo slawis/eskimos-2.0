@@ -46,6 +46,9 @@ dependencies = [
     # Validation & Utils
     "phonenumbers>=8.13",
     "python-dotenv>=1.0",
+
+    # Serial modem (SIM7600G-H AT commands)
+    "pyserial>=3.5",
 ]
 
 [project.optional-dependencies]

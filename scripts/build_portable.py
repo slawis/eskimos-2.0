@@ -49,6 +49,7 @@ PACKAGES = [
     "structlog>=24.1",
     "phonenumbers>=8.13",
     "python-dotenv>=1.0",
+    "pyserial>=3.5",
 ]
 
 
@@ -728,8 +729,23 @@ def create_config(build_dir: Path) -> None:
 
     env_file = config_dir / ".env"
     env_file.write_text('''# Eskimos Gateway Configuration
-ESKIMOS_MODEM_HOST=192.168.1.1
-ESKIMOS_MODEM_PHONE=886480453
+# ================================
+
+# Modem type: "serial" (SIM7600G-H AT commands) or "ik41" (Alcatel JSON-RPC)
+MODEM_TYPE=serial
+
+# Phone number in modem SIM card
+ESKIMOS_MODEM_PHONE=WPISZ_NUMER
+
+# Serial modem settings (for MODEM_TYPE=serial)
+# auto = auto-detect COM port, or set explicitly e.g. COM6
+SERIAL_PORT=auto
+SERIAL_BAUDRATE=115200
+
+# Legacy IK41 modem settings (for MODEM_TYPE=ik41)
+# ESKIMOS_MODEM_HOST=192.168.1.1
+
+# Debug mode
 ESKIMOS_DEBUG=false
 ''')
 

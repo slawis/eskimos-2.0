@@ -146,14 +146,15 @@
                 <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
                         <label for="recipient" class="block text-sm font-medium text-gray-700">Numer telefonu</label>
-                        <input type="text" name="recipient" id="recipient"
+                        <input type="tel" name="recipient" id="recipient"
                             class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-eskimos-500 focus:border-eskimos-500 sm:text-sm"
-                            placeholder="123456789" required pattern="[0-9]{9}">
+                            placeholder="530 123 123" required>
                     </div>
                     <div>
                         <label for="modem_type" class="block text-sm font-medium text-gray-700">Modem</label>
                         <select name="modem_type" id="modem_type"
                             class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-eskimos-500 focus:border-eskimos-500 sm:text-sm">
+                            <option value="serial">SIM7600G-H (Serial)</option>
                             <option value="mock">Mock (testowy)</option>
                             <option value="puppeteer">IK41VE1 (Puppeteer)</option>
                         </select>
@@ -189,6 +190,26 @@
 
 {% block scripts %}
 <script>
+    // Phone number auto-formatter: "530123123" → "530 123 123"
+    const recipientInput = document.getElementById('recipient');
+    recipientInput.addEventListener('input', function() {
+        const digits = this.value.replace(/\D/g, '').replace(/^48/, '').slice(0, 9);
+        if (digits.length > 6) {
+            this.value = digits.slice(0, 3) + ' ' + digits.slice(3, 6) + ' ' + digits.slice(6);
+        } else if (digits.length > 3) {
+            this.value = digits.slice(0, 3) + ' ' + digits.slice(3);
+        } else {
+            this.value = digits;
+        }
+    });
+
+    // Clean phone number before HTMX form submit
+    document.body.addEventListener('htmx:configRequest', function(event) {
+        if (event.detail.path === '/api/sms/send' && event.detail.parameters.recipient) {
+            event.detail.parameters.recipient = event.detail.parameters.recipient.replace(/\D/g, '');
+        }
+    });
+
     // Character counter
     const messageInput = document.getElementById('message');
     const charCount = document.getElementById('char-count');

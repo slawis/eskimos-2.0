@@ -17,9 +17,16 @@ try:
 except ImportError:
     PuppeteerModemAdapter = None  # type: ignore
 
+# Serial AT adapter - SIM7600G-H and compatible USB modems
+try:
+    from eskimos.adapters.modem.serial_at import SerialModemAdapter
+except ImportError:
+    SerialModemAdapter = None  # type: ignore
+
 __all__ = [
     "ModemAdapter",
     "ModemError",
     "MockModemAdapter",
     "PuppeteerModemAdapter",
+    "SerialModemAdapter",
 ]

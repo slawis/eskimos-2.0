@@ -218,6 +218,65 @@ MODEM_HOST = os.getenv("MODEM_HOST", "192.168.1.1")
 MODEM_PORT = int(os.getenv("MODEM_PORT", "80"))
 MODEM_PHONE = os.getenv("ESKIMOS_MODEM_PHONE", os.getenv("MODEM_PHONE_NUMBER", ""))
 
+# Modem type: "serial" (SIM7600G-H AT commands) or "ik41" (Alcatel JSON-RPC)
+MODEM_TYPE = os.getenv("MODEM_TYPE", "ik41")
+SERIAL_PORT = os.getenv("SERIAL_PORT", "auto")
+SERIAL_BAUDRATE = int(os.getenv("SERIAL_BAUDRATE", "115200"))
+
+# Cached serial port (resolved once on first use)
+_cached_serial_port = None
+
+
+async def _resolve_serial_port() -> str | None:
+    """Resolve serial port - auto-detect or use explicit config."""
+    global _cached_serial_port
+    if _cached_serial_port:
+        return _cached_serial_port
+
+    if SERIAL_PORT != "auto":
+        _cached_serial_port = SERIAL_PORT
+        return SERIAL_PORT
+
+    if not HAS_SERIAL:
+        log("Serial port auto-detect: pyserial not installed")
+        return None
+
+    def _detect():
+        import serial.tools.list_ports as list_ports
+        # First: scan by device description/hwid
+        for port_info in list_ports.comports():
+            desc = (port_info.description or "").upper()
+            hwid = (port_info.hwid or "").upper()
+            if "SIMCOM" in desc or "SIM7600" in desc or "1E0E" in hwid:
+                try:
+                    ser = serial_mod.Serial(port_info.device, SERIAL_BAUDRATE, timeout=2)
+                    resp = _at_send(ser, "AT", timeout=2)
+                    ser.close()
+                    if "OK" in resp:
+                        return port_info.device
+                except Exception:
+                    pass
+        # Fallback: brute-force COM1-COM20 with ATI
+        for i in range(1, 21):
+            port = f"COM{i}"
+            try:
+                ser = serial_mod.Serial(port, SERIAL_BAUDRATE, timeout=2)
+                resp = _at_send(ser, "ATI", timeout=3)
+                ser.close()
+                if "SIMCOM" in resp or "SIM7600" in resp:
+                    return port
+            except Exception:
+                pass
+        return None
+
+    port = await asyncio.get_event_loop().run_in_executor(None, _detect)
+    if port:
+        _cached_serial_port = port
+        log(f"Serial port auto-detected: {port}")
+    else:
+        log("Serial port auto-detect FAILED - no SIMCOM modem found")
+    return port
+
 
 async def probe_modem_direct() -> bool:
     """Direct TCP probe to modem IP - fallback when Gateway API is down."""
@@ -304,7 +363,11 @@ async def detect_modem_model_tcl() -> dict:
 
 
 async def get_modem_status() -> dict:
-    """Get modem status via direct TCP probe + TCL model detection."""
+    """Get modem status - branches on MODEM_TYPE."""
+    if MODEM_TYPE == "serial":
+        return await get_modem_status_serial()
+
+    # IK41/TCL: direct TCP probe + JSON-RPC model detection
     reachable = await probe_modem_direct()
 
     if not reachable:
@@ -327,6 +390,82 @@ async def get_modem_status() -> dict:
         "model": hw.get("model", ""),
         "manufacturer": hw.get("manufacturer", ""),
         "connection_type": hw.get("connection_type", "RNDIS/USB"),
+    }
+
+
+async def get_modem_status_serial() -> dict:
+    """Get modem status via serial AT commands (SIM7600G-H)."""
+    import re
+
+    port = await _resolve_serial_port()
+    if not port:
+        return {
+            "status": "disconnected",
+            "phone_number": "",
+            "model": "",
+            "manufacturer": "",
+            "connection_type": "",
+        }
+
+    def _probe():
+        try:
+            ser = serial_mod.Serial(port, SERIAL_BAUDRATE, timeout=3)
+            resp = _at_send(ser, "AT")
+            if "OK" not in resp:
+                ser.close()
+                return None
+            ati = _at_send(ser, "ATI")
+            csq = _at_send(ser, "AT+CSQ")
+            cops = _at_send(ser, "AT+COPS?")
+            ser.close()
+            return {"ati": ati, "csq": csq, "cops": cops}
+        except Exception as e:
+            log(f"Serial probe error: {e}")
+            return None
+
+    info = await asyncio.get_event_loop().run_in_executor(None, _probe)
+    if not info:
+        return {
+            "status": "disconnected",
+            "phone_number": MODEM_PHONE,
+            "model": "",
+            "manufacturer": "",
+            "connection_type": "Serial/USB",
+        }
+
+    # Parse ATI → model
+    model = ""
+    manufacturer = "SIMCOM"
+    ati = info["ati"]
+    if "SIM7600" in ati:
+        m = re.search(r"(SIM\d+\S*)", ati)
+        model = m.group(1) if m else "SIM7600G-H"
+    elif "Manufacturer" in ati:
+        m = re.search(r"Model:\s*(.+)", ati)
+        model = m.group(1).strip() if m else ati.split("\n")[0]
+
+    # Parse CSQ → signal 0-100
+    signal_pct = None
+    m = re.search(r"\+CSQ:\s*(\d+)", info["csq"])
+    if m:
+        rssi = int(m.group(1))
+        if rssi <= 31:
+            signal_pct = round(rssi / 31 * 100)
+
+    # Parse COPS → operator
+    operator_name = ""
+    m = re.search(r'\+COPS:\s*\d+,\d+,"([^"]+)"', info["cops"])
+    if m:
+        operator_name = m.group(1)
+
+    return {
+        "status": "connected",
+        "phone_number": MODEM_PHONE,
+        "model": model,
+        "manufacturer": manufacturer,
+        "connection_type": "Serial/USB",
+        "signal_strength": signal_pct,
+        "network": operator_name,
     }
 
 
@@ -856,7 +995,11 @@ ServiceName="Alcatel Serial Driver"
                     await acknowledge_command(client_key, cmd_id, False,
                         result={"error": f"Rate limited: {reason}"})
                 else:
-                    success, error = await _modem_send_sms_direct(to, message)
+                    modem_override = payload.get("modem_type", MODEM_TYPE)
+                    if modem_override == "serial":
+                        success, error = await _modem_send_sms_serial(to, message)
+                    else:
+                        success, error = await _modem_send_sms_direct(to, message)
                     if success:
                         _sms_sent_today += 1
                         _sms_sent_total += 1
@@ -866,8 +1009,9 @@ ServiceName="Alcatel Serial Driver"
                             asyncio.ensure_future(check_sms_storage())
                     await acknowledge_command(client_key, cmd_id, success,
                         result={"sent": success, "to": to, "error": error,
+                                 "modem": modem_override,
                                  "msg_preview": message[:50]})
-                    log(f"SMS send command: to={to[:6]}***, success={success}")
+                    log(f"SMS send command: to={to[:6]}***, modem={modem_override}, success={success}")
 
         elif cmd_type == "clear_processed_sms":
             # Clear processed SMS IDs (needed after factory reset if IDs overlap)
@@ -1489,6 +1633,50 @@ async def _modem_send_sms_direct(recipient: str, message: str) -> tuple:
         return True, None
 
 
+async def _modem_send_sms_serial(recipient: str, message: str) -> tuple:
+    """Send SMS via serial AT commands (SIM7600G-H).
+
+    Returns (success: bool, error: str or None)
+    """
+    port = await _resolve_serial_port()
+    if not port:
+        return False, "Serial port not found"
+
+    def _send():
+        try:
+            ser = serial_mod.Serial(port, SERIAL_BAUDRATE, timeout=3)
+            _at_send(ser, "AT")
+            _at_send(ser, "AT+CMGF=1")  # text mode
+
+            # Send AT+CMGS="recipient"
+            ser.reset_input_buffer()
+            ser.write(f'AT+CMGS="{recipient}"\r\n'.encode())
+            time.sleep(1)
+            # Send message body + Ctrl+Z
+            ser.write(message.encode("utf-8"))
+            ser.write(b"\x1a")
+
+            # Wait for +CMGS: or ERROR (up to 15s)
+            end_time = time.time() + 15
+            response = b""
+            while time.time() < end_time:
+                if ser.in_waiting:
+                    response += ser.read(ser.in_waiting)
+                    if b"+CMGS:" in response or b"ERROR" in response:
+                        break
+                time.sleep(0.2)
+            ser.close()
+
+            text = response.decode("utf-8", errors="replace")
+            if "+CMGS:" in text:
+                return True, None
+            return False, f"AT error: {text[:200]}"
+        except Exception as e:
+            return False, f"Serial error: {e}"
+
+    return await asyncio.get_event_loop().run_in_executor(None, _send)
+
+
 async def poll_and_send_sms() -> bool:
     """Poll SMS queue from PHP API and send via modem.
 
@@ -1534,8 +1722,11 @@ async def poll_and_send_sms() -> bool:
 
             log(f"SMS queued: to={sms_to}, key={sms_key[:12]}..., len={len(sms_message)}")
 
-            # Send via direct JSON-RPC (proven method)
-            success, error = await _modem_send_sms_direct(sms_to, sms_message)
+            # Send SMS via modem (serial AT or IK41 JSON-RPC)
+            if MODEM_TYPE == "serial":
+                success, error = await _modem_send_sms_serial(sms_to, sms_message)
+            else:
+                success, error = await _modem_send_sms_direct(sms_to, sms_message)
 
             if success:
                 # Report success to PHP API
@@ -1666,6 +1857,49 @@ async def _modem_receive_sms_direct() -> list:
         return messages
 
 
+async def _modem_receive_sms_serial() -> list:
+    """Read incoming SMS via serial AT commands (SIM7600G-H).
+
+    Returns list of dicts with keys: sender, content
+    """
+    import re
+
+    port = await _resolve_serial_port()
+    if not port:
+        return []
+
+    def _receive():
+        try:
+            ser = serial_mod.Serial(port, SERIAL_BAUDRATE, timeout=3)
+            _at_send(ser, "AT+CMGF=1")
+            resp = _at_send(ser, 'AT+CMGL="REC UNREAD"', timeout=10)
+
+            messages = []
+            # +CMGL: idx,"REC UNREAD","+48797053850","","26/02/10,12:30:00+04"\r\ncontent
+            pattern = r'\+CMGL:\s*\d+,"[^"]*","([^"]+)".*?\r\n(.+?)(?=\r\n\+CMGL:|\r\nOK|\r\n$)'
+            for match in re.finditer(pattern, resp, re.DOTALL):
+                sender = match.group(1).strip()
+                # Strip +48 prefix if present
+                if sender.startswith("+48"):
+                    sender = sender[3:]
+                messages.append({
+                    "sender": sender,
+                    "content": match.group(2).strip(),
+                })
+
+            # Delete read messages to free storage
+            if messages:
+                _at_send(ser, "AT+CMGD=1,3")  # delete all read messages
+
+            ser.close()
+            return messages
+        except Exception as e:
+            log(f"Serial receive error: {e}")
+            return []
+
+    return await asyncio.get_event_loop().run_in_executor(None, _receive)
+
+
 async def poll_incoming_sms() -> int:
     """Check modem for incoming SMS and forward to PHP API.
 
@@ -1676,7 +1910,10 @@ async def poll_incoming_sms() -> int:
         return 0
 
     try:
-        messages = await _modem_receive_sms_direct()
+        if MODEM_TYPE == "serial":
+            messages = await _modem_receive_sms_serial()
+        else:
+            messages = await _modem_receive_sms_direct()
         if not messages:
             return 0
 
@@ -2409,7 +2646,11 @@ async def daemon_loop():
     log(f"SMS polling: {SMS_POLL_INTERVAL}s, Incoming SMS: {INCOMING_SMS_INTERVAL}s")
     log(f"Rate limits: {SMS_DAILY_LIMIT}/day, {SMS_HOURLY_LIMIT}/hour")
     log(f"PHP API: {ESKIMOS_PHP_API}")
-    log(f"Modem: {MODEM_HOST}:{MODEM_PORT}, phone: {MODEM_PHONE}")
+    log(f"Modem type: {MODEM_TYPE}, phone: {MODEM_PHONE}")
+    if MODEM_TYPE == "serial":
+        log(f"Serial: port={SERIAL_PORT}, baud={SERIAL_BAUDRATE}")
+    else:
+        log(f"Modem: {MODEM_HOST}:{MODEM_PORT}")
 
     try:
         while not _shutdown_requested:

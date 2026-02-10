@@ -18,6 +18,18 @@ from eskimos import __version__
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# Load config/.env into os.environ (Gateway process doesn't load it automatically)
+from pathlib import Path as _Path
+_env_file = _Path(__file__).parent.parent.parent.parent / "config" / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            _k, _v = _k.strip(), _v.strip()
+            if _k and _k not in os.environ:
+                os.environ[_k] = _v
+
 # Modem configuration from environment
 MODEM_HOST = os.environ.get("MODEM_HOST", "192.168.1.1")
 MODEM_PORT = int(os.environ.get("MODEM_PORT", "80"))
@@ -27,6 +39,29 @@ MODEM_PROBE_TIMEOUT = float(os.environ.get("MODEM_PROBE_TIMEOUT", "5.0"))
 
 # Cache for hardware detection
 _modem_hw_cache: Optional[dict] = None
+
+
+def _resolve_serial_port() -> str:
+    """Resolve serial port - auto-detect or use explicit config."""
+    port = os.environ.get("SERIAL_PORT", "auto")
+    if port != "auto":
+        return port
+    try:
+        import serial.tools.list_ports
+        for p in serial.tools.list_ports.comports():
+            desc = (p.description or "").upper()
+            if ("SIMCOM" in desc or "SIM7600" in desc) and "AT" in desc:
+                return p.device
+        for p in serial.tools.list_ports.comports():
+            desc = (p.description or "").upper()
+            if "SIMCOM" in desc or "SIM7600" in desc:
+                return p.device
+    except ImportError:
+        pass
+    return "COM6"  # fallback
+
+
+SERIAL_PORT = _resolve_serial_port()
 
 
 class ModemHealthInfo(BaseModel):
@@ -39,6 +74,8 @@ class ModemHealthInfo(BaseModel):
     model: str = ""
     manufacturer: str = ""
     connection_type: str = ""
+    signal_strength: int | None = None
+    network: str = ""
 
 
 class HealthResponse(BaseModel):
@@ -263,27 +300,67 @@ async def probe_modem(host: str, port: int, timeout: float) -> bool:
         return False
 
 
+async def probe_serial_modem(port: str) -> dict:
+    """Probe serial modem via AT commands. Returns modem info dict."""
+    try:
+        from eskimos.adapters.modem.serial_at import SerialModemAdapter, SerialModemConfig
+
+        config = SerialModemConfig(phone_number=MODEM_PHONE, port=port)
+        adapter = SerialModemAdapter(config)
+        await adapter.connect()
+
+        info = await adapter.get_modem_info()
+        network = await adapter.get_network_info()
+        signal = await adapter.get_signal_strength()
+
+        await adapter.disconnect()
+
+        return {
+            "connected": True,
+            "model": info.get("model", ""),
+            "manufacturer": info.get("manufacturer", ""),
+            "connection_type": "Serial/AT",
+            "signal_strength": signal,
+            "network": network.get("operator", ""),
+            "technology": network.get("technology", ""),
+        }
+    except Exception as e:
+        logger.warning("Serial modem probe failed on %s: %s", port, e)
+        return {"connected": False}
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
     """Check API health, modem connectivity and hardware info."""
     global _modem_hw_cache
 
-    modem_reachable = await probe_modem(MODEM_HOST, MODEM_PORT, MODEM_PROBE_TIMEOUT)
-
     hw = {"model": "", "manufacturer": "", "connection_type": ""}
+    modem_reachable = False
+    signal_strength = None
+    network = ""
 
-    if modem_reachable:
-        # Use cache if available
-        if _modem_hw_cache is not None:
-            hw = _modem_hw_cache
-        else:
-            try:
-                hw = await detect_modem_via_http(MODEM_HOST, MODEM_PORT, MODEM_PROBE_TIMEOUT)
-                _modem_hw_cache = hw
-            except Exception:
-                pass
+    if MODEM_TYPE == "serial":
+        # Serial modem: probe via AT commands
+        serial_info = await probe_serial_modem(SERIAL_PORT)
+        modem_reachable = serial_info.get("connected", False)
+        if modem_reachable:
+            hw = serial_info
+            signal_strength = serial_info.get("signal_strength")
+            network = serial_info.get("network", "")
     else:
-        clear_modem_cache()
+        # HTTP-based modem (IK41, Dinstar)
+        modem_reachable = await probe_modem(MODEM_HOST, MODEM_PORT, MODEM_PROBE_TIMEOUT)
+        if modem_reachable:
+            if _modem_hw_cache is not None:
+                hw = _modem_hw_cache
+            else:
+                try:
+                    hw = await detect_modem_via_http(MODEM_HOST, MODEM_PORT, MODEM_PROBE_TIMEOUT)
+                    _modem_hw_cache = hw
+                except Exception:
+                    pass
+        else:
+            clear_modem_cache()
 
     return HealthResponse(
         status="ok",
@@ -293,11 +370,13 @@ async def health_check() -> HealthResponse:
         modem=ModemHealthInfo(
             connected=modem_reachable,
             phone_number=MODEM_PHONE if modem_reachable else "",
-            host=MODEM_HOST,
+            host=SERIAL_PORT if MODEM_TYPE == "serial" else MODEM_HOST,
             adapter_type=MODEM_TYPE,
             model=hw.get("model", ""),
             manufacturer=hw.get("manufacturer", ""),
             connection_type=hw.get("connection_type", ""),
+            signal_strength=signal_strength,
+            network=network,
         ),
         api_available=True,
     )

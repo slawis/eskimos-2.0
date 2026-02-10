@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     )
 
     # ==================== Modem ====================
-    modem_type: Literal["puppeteer", "dinstar", "mock"] = Field(
+    modem_type: Literal["puppeteer", "dinstar", "mock", "serial"] = Field(
         default="mock",
         description="Type of modem adapter to use",
     )
@@ -90,6 +90,16 @@ class Settings(BaseSettings):
     dinstar_password: str = Field(
         default="admin",
         description="Dinstar admin password",
+    )
+
+    # Serial AT modem specific (SIM7600G-H)
+    serial_port: str = Field(
+        default="COM6",
+        description="Serial COM port for AT modem",
+    )
+    serial_baudrate: int = Field(
+        default=115200,
+        description="Serial baud rate",
     )
 
     # ==================== Rate Limiting ====================
@@ -160,6 +170,12 @@ class Settings(BaseSettings):
     legacy_api_url: str = Field(
         default="https://eskimos.ninjabot.pl/api/v2",
         description="Legacy PHP API URL",
+    )
+
+    # ==================== API Authentication ====================
+    eskimos_api_key: str = Field(
+        default="",
+        description="API key for protecting SMS/modem endpoints (X-API-Key header). Empty = auth disabled.",
     )
 
     # ==================== Central API (Daemon) ====================
