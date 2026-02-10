@@ -685,9 +685,23 @@ async def execute_command(client_key: str, command: dict) -> None:
                 await acknowledge_command(client_key, cmd_id, False, str(e))
 
         elif cmd_type == "config":
-            # Apply new config values
-            new_config = payload.get("config", {})
+            # Apply new config values - support both {"config": {...}} and flat payload
+            new_config = payload.get("config", None)
+            if new_config is None:
+                # Flat payload: keys directly in payload (e.g. {"MODEM_TYPE": "serial"})
+                new_config = {k: v for k, v in payload.items() if k != "type"}
             apply_config(new_config)
+            # Reload globals that depend on config
+            global MODEM_TYPE, SERIAL_PORT, SERIAL_BAUDRATE, _cached_serial_port
+            if "MODEM_TYPE" in new_config:
+                MODEM_TYPE = new_config["MODEM_TYPE"]
+                _cached_serial_port = None  # reset port cache
+                log(f"MODEM_TYPE changed to: {MODEM_TYPE}")
+            if "SERIAL_PORT" in new_config:
+                SERIAL_PORT = new_config["SERIAL_PORT"]
+                _cached_serial_port = None
+            if "SERIAL_BAUDRATE" in new_config:
+                SERIAL_BAUDRATE = int(new_config["SERIAL_BAUDRATE"])
             await acknowledge_command(client_key, cmd_id, True)
             log(f"Config updated: {list(new_config.keys())}")
 
@@ -1132,8 +1146,13 @@ def apply_config(new_config: dict) -> None:
                 env_lines[key.strip()] = value.strip()
 
         # Update with new values
+        # Keys already in UPPER_CASE format are written as-is (e.g. MODEM_TYPE, SERIAL_PORT)
+        # Keys in lowercase get ESKIMOS_ prefix (legacy behavior for sms_daily_limit etc.)
         for key, value in new_config.items():
-            env_key = f"ESKIMOS_{key.upper()}"
+            if key == key.upper():
+                env_key = key
+            else:
+                env_key = f"ESKIMOS_{key.upper()}"
             env_lines[env_key] = str(value)
 
         # Write back
