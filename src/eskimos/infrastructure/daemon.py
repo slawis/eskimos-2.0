@@ -676,26 +676,56 @@ async def execute_command(client_key: str, command: dict) -> None:
 
     try:
         if cmd_type == "update":
-            from eskimos.infrastructure.updater import perform_update
-            success = await perform_update(payload.get("version"))
-            await acknowledge_command(client_key, cmd_id, success, None if success else "Update failed")
-            if success:
-                log("Update complete, restarting Gateway + Daemon...")
-                # Restart Gateway service first (picks up new Python code)
-                try:
-                    import subprocess
-                    subprocess.run(["net", "stop", "EskimosGateway"],
-                                   timeout=30, capture_output=True)
-                    await asyncio.sleep(2)
-                    subprocess.run(["net", "start", "EskimosGateway"],
-                                   timeout=30, capture_output=True)
-                    log("Gateway service restarted")
-                except Exception as e:
-                    log(f"Gateway restart skipped: {e}")
-                await asyncio.sleep(2)
-                graceful_shutdown()
-            else:
-                log("Update failed, continuing with current version")
+            # Windows-safe update: download zip, then launch helper batch that
+            # waits for daemon to exit, replaces files, and restarts everything.
+            import subprocess
+            from eskimos.infrastructure.updater import download_update
+            try:
+                zip_file = await download_update(payload.get("version"))
+                if not zip_file:
+                    await acknowledge_command(client_key, cmd_id, False, "Download failed")
+                    log("Update download failed")
+                else:
+                    # Write helper batch script
+                    bat_path = PORTABLE_ROOT / "_update_helper.bat"
+                    bat_content = f"""@echo off
+cd /d "{PORTABLE_ROOT}"
+echo Waiting for daemon to exit...
+timeout /t 5 /nobreak >nul
+echo Applying update from {zip_file.name}...
+if exist eskimos.bak rmdir /s /q eskimos.bak
+rename eskimos eskimos.bak
+tar -xf "{zip_file}" -C _updates\\extract 2>nul
+if exist _updates\\extract\\EskimosGateway\\eskimos (
+    move _updates\\extract\\EskimosGateway\\eskimos eskimos
+) else if exist _updates\\extract\\eskimos (
+    move _updates\\extract\\eskimos eskimos
+) else (
+    echo ERROR: eskimos folder not found in zip, restoring backup
+    rename eskimos.bak eskimos
+    goto :cleanup
+)
+if exist eskimos.bak rmdir /s /q eskimos.bak
+:cleanup
+if exist _updates rmdir /s /q _updates
+del "{zip_file}" 2>nul
+echo Update applied, starting services...
+call START_ALL.bat
+del "%~f0"
+"""
+                    bat_path.write_text(bat_content, encoding="utf-8")
+                    # Launch helper (runs after daemon exits)
+                    subprocess.Popen(
+                        ["cmd", "/c", str(bat_path)],
+                        creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    )
+                    await acknowledge_command(client_key, cmd_id, True)
+                    log("Update downloaded, helper script launched, shutting down...")
+                    await asyncio.sleep(1)
+                    graceful_shutdown()
+            except Exception as e:
+                await acknowledge_command(client_key, cmd_id, False, str(e))
+                log(f"Update error: {e}")
 
         elif cmd_type == "restart":
             await acknowledge_command(client_key, cmd_id, True)
