@@ -362,9 +362,48 @@ async def detect_modem_model_tcl() -> dict:
     return result
 
 
+GATEWAY_PORT = int(os.getenv("ESKIMOS_GATEWAY_PORT", "8000"))
+
+
+async def _get_modem_status_via_gateway() -> dict | None:
+    """Get modem status by querying local Gateway API (localhost:8000/api/health).
+
+    The Gateway process can see USB COM ports that the daemon process sometimes cannot
+    on Windows (different process context). This provides a reliable fallback.
+    """
+    try:
+        if not HAS_HTTPX:
+            return None
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"http://127.0.0.1:{GATEWAY_PORT}/api/health")
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            modem = data.get("modem", {})
+            if not modem.get("connected"):
+                return None
+            return {
+                "status": "connected",
+                "phone_number": modem.get("phone_number", MODEM_PHONE),
+                "model": modem.get("model", ""),
+                "manufacturer": modem.get("manufacturer", ""),
+                "connection_type": modem.get("connection_type", "Serial/USB"),
+                "signal_strength": modem.get("signal_strength"),
+                "network": modem.get("network", ""),
+            }
+    except Exception as e:
+        log(f"Gateway API modem status failed: {e}")
+        return None
+
+
 async def get_modem_status() -> dict:
     """Get modem status - branches on MODEM_TYPE."""
     if MODEM_TYPE == "serial":
+        # Try Gateway API first (Gateway process can see COM ports reliably)
+        gw_status = await _get_modem_status_via_gateway()
+        if gw_status:
+            return gw_status
+        # Fallback: direct serial probe
         return await get_modem_status_serial()
 
     # IK41/TCL: direct TCP probe + JSON-RPC model detection
