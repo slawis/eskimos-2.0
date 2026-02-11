@@ -360,11 +360,14 @@ pause
     stop_all_bat.write_text(r'''@echo off
 echo Stopping all Eskimos services...
 
-:: Stop by window title
+:: Stop CMD windows by title
 taskkill /f /fi "WINDOWTITLE eq Eskimos*" 2>nul
 
-:: Stop Python processes (fallback)
-taskkill /f /im python.exe /fi "WINDOWTITLE eq *Eskimos*" 2>nul
+:: Wait for CMD windows to close
+timeout /t 2 /nobreak >nul
+
+:: Kill ALL python processes (CMD child processes don't inherit window title)
+taskkill /f /im python.exe 2>nul
 taskkill /f /im pythonw.exe 2>nul
 
 :: Remove PID file
