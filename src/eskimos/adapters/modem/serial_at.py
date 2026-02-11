@@ -104,7 +104,7 @@ class SerialModemAdapter(BaseModemAdapter):
 
     async def _at_send(self, cmd: str, timeout: float | None = None) -> str:
         """Send AT command (async wrapper)."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._at_send_sync, cmd, timeout)
 
     # ==================== ModemAdapter Interface ====================
@@ -134,7 +134,7 @@ class SerialModemAdapter(BaseModemAdapter):
                     modem_number=self._phone_number,
                 )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _connect_sync)
 
         # Verify modem responds
@@ -167,7 +167,7 @@ class SerialModemAdapter(BaseModemAdapter):
                 self._serial.close()
             self._serial = None
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _close_sync)
         self._status = ModemStatus.OFFLINE
         self._connected = False
@@ -264,7 +264,7 @@ class SerialModemAdapter(BaseModemAdapter):
                     modem_number=self._phone_number,
                 )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _send_sync)
 
         if result.success:
@@ -321,7 +321,7 @@ class SerialModemAdapter(BaseModemAdapter):
 
             return messages
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _receive_sync)
 
     async def health_check(self) -> bool:

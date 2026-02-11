@@ -209,4 +209,4 @@ class SmsOutgoingService:
             except Exception as e:
                 return False, f"Serial error: {e}"
 
-        return await asyncio.get_event_loop().run_in_executor(None, _send)
+        return await asyncio.get_running_loop().run_in_executor(None, _send)

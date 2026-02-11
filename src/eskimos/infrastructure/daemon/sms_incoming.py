@@ -260,4 +260,4 @@ class SmsIncomingService:
                 log(f"Serial receive error: {e}", log_file)
                 return []
 
-        return await asyncio.get_event_loop().run_in_executor(None, _receive)
+        return await asyncio.get_running_loop().run_in_executor(None, _receive)

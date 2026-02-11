@@ -111,7 +111,7 @@ class ModemStatusProvider:
                     pass
             return None
 
-        port = await asyncio.get_event_loop().run_in_executor(None, _detect)
+        port = await asyncio.get_running_loop().run_in_executor(None, _detect)
         if port:
             self._cached_serial_port = port
             log(f"Serial port auto-detected: {port}", self.config.log_file)
@@ -254,7 +254,7 @@ class ModemStatusProvider:
                 log(f"Serial probe error: {e}", self.config.log_file)
                 return None
 
-        info = await asyncio.get_event_loop().run_in_executor(None, _probe)
+        info = await asyncio.get_running_loop().run_in_executor(None, _probe)
         if not info:
             return {
                 "status": "disconnected",
