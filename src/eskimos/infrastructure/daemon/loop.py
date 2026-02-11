@@ -84,12 +84,29 @@ class DaemonOrchestrator:
         self.tunnel.register_handler("command", self._on_ws_command)
         self.tunnel.register_handler("at_command", self._on_ws_at_command)
 
-        # Stream logs through tunnel
+        # Stream logs through tunnel (rate-limited, re-entrancy safe)
+        _sending_log = False
+        _log_budget = 10
+        _log_budget_reset = time.time()
+
         def _log_to_ws(msg: str) -> None:
+            nonlocal _sending_log, _log_budget, _log_budget_reset
+            if _sending_log:
+                return
+            now = time.time()
+            if now - _log_budget_reset >= 1.0:
+                _log_budget = 10
+                _log_budget_reset = now
+            if _log_budget <= 0:
+                return
             if self.tunnel and self.tunnel.connected:
+                _log_budget -= 1
+                _sending_log = True
                 asyncio.ensure_future(
                     self.tunnel.send("log", {"message": msg, "level": "info"})
                 )
+                _sending_log = False
+
         add_log_callback(_log_to_ws)
 
     async def _on_ws_command(self, msg: dict) -> None:
@@ -105,14 +122,20 @@ class DaemonOrchestrator:
             self.config.log_file)
 
         # Delegate to existing command handler registry
-        await self.handlers.execute(self.tunnel.client_key, payload)
+        # handlers.execute() does its own HTTP ack internally
+        # We wrap in try/except to send the real result back via WS
+        try:
+            await self.handlers.execute(self.tunnel.client_key, payload)
+            success, error = True, None
+        except Exception as e:
+            success, error = False, str(e)
 
-        # Send result back through tunnel
         if self.tunnel and self.tunnel.connected:
             await self.tunnel.send("command_result", {
                 "id": cmd_id,
                 "command_type": cmd_type,
-                "success": True,
+                "success": success,
+                "error": error,
             }, msg_id=msg.get("id"))
 
     async def _on_ws_at_command(self, msg: dict) -> None:
@@ -160,7 +183,7 @@ class DaemonOrchestrator:
             except Exception as e:
                 return False, str(e)
 
-        success, response = await asyncio.get_event_loop().run_in_executor(
+        success, response = await asyncio.get_running_loop().run_in_executor(
             None, _run_at)
 
         if self.tunnel and self.tunnel.connected:
