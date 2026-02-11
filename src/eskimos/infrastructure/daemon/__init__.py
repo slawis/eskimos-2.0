@@ -29,3 +29,4 @@ from eskimos.infrastructure.daemon.process import (  # noqa: F401
     setup_signal_handlers,
 )
 from eskimos.infrastructure.daemon.loop import daemon_loop  # noqa: F401
+from eskimos.infrastructure.daemon.tunnel import WebSocketTunnel  # noqa: F401

@@ -568,14 +568,14 @@ ServiceName="Alcatel Serial Driver"
         )
 
     async def _handle_sms_at_probe(self, client_key, cmd_id, payload):
-        result = await self.at_helper.probe_at_ports(self.config)
+        result = await self.at_helper.probe_at_ports()
         await self._ack(client_key, cmd_id, True, result=result)
         log(f"AT probe complete: port={result.get('at_port')}",
             self.config.log_file)
 
     async def _handle_sms_at_delete(self, client_key, cmd_id, payload):
         com_port = payload.get("com_port")
-        result = await self.at_helper.delete_sms_via_at(com_port, self.config)
+        result = await self.at_helper.delete_sms_via_at(com_port)
         await self._ack(
             client_key, cmd_id, result.get("success", False), result=result)
         log(

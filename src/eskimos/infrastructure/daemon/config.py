@@ -78,6 +78,12 @@ class DaemonConfig:
     sms_storage_auto_reset: bool = True
     sms_storage_warn_percent: int = 80
 
+    # WebSocket tunnel
+    ws_enabled: bool = False
+    ws_url: str = ""
+    ws_reconnect_interval: int = 10
+    ws_ping_interval: int = 30
+
     @classmethod
     def from_env(cls) -> DaemonConfig:
         """Load config from .env file + environment variables."""
@@ -112,4 +118,8 @@ class DaemonConfig:
             serial_port=_env("ESKIMOS_SERIAL_PORT", "auto"),
             serial_baudrate=_env_int("ESKIMOS_SERIAL_BAUDRATE", 115200),
             gateway_port=_env_int("ESKIMOS_GATEWAY_PORT", 8000),
+            ws_enabled=_env_bool("ESKIMOS_WS_ENABLED", False),
+            ws_url=_env("ESKIMOS_WS_URL", ""),
+            ws_reconnect_interval=_env_int("ESKIMOS_WS_RECONNECT_INTERVAL", 10),
+            ws_ping_interval=_env_int("ESKIMOS_WS_PING_INTERVAL", 30),
         )
